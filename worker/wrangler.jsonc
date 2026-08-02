@@ -1,0 +1,76 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "salesnav-enrichment",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+
+  // Free plan: no Workflows (50 subrequests / 10ms CPU per invocation is far
+  // too small for a 1000-contact job) and no R2 (needs billing enabled).
+  // This worker is a credential-holding proxy; the extension orchestrates.
+  // No node builtins: the workbook writer uses the platform's own
+  // CompressionStream/TextEncoder, and the worker has zero runtime deps.
+
+  "observability": {
+    "enabled": true
+  },
+
+  // ─── D1: users, tokens (hashed), jobs, usage log ───
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "salesnav-enrichment",
+      "database_id": "d6f1dd83-a79a-4afa-be50-349ae3383f3e"
+    }
+  ],
+
+  "vars": {
+    // Model used for ICP scoring. Any OpenRouter slug.
+    "OPENROUTER_MODEL": "anthropic/claude-sonnet-5",
+
+    // Must be <= your HarvestAPI plan's concurrency
+    // (free 1 / starter 5 / basic 10 / pro 20 / business 40).
+    // Also used as the workflow chunk size.
+    "HARVEST_CONCURRENCY": "5",
+
+    // Max pages of posts / comments / reactions pulled per contact.
+    // Each page is one HarvestAPI call (one credit).
+    "MAX_POST_PAGES": "3",
+    "MAX_COMMENT_PAGES": "2",
+    "MAX_REACTION_PAGES": "1",
+
+    // Reactions carry no timestamp in the HarvestAPI response, so they cannot
+    // be scoped to 6 months — they are pulled as "recent, undated" signal.
+    // Set to "false" to save one credit per contact.
+    "INCLUDE_REACTIONS": "true",
+
+    // Ask HarvestAPI to find + SMTP-verify a work email (costs extra credits).
+    "FIND_EMAIL": "false",
+
+    // When a profile exposes no company slug, fall back to a company lookup by
+    // the scraped display name. Deduped, so it costs at most one credit per
+    // distinct name. Set to "false" to skip the fuzzy path entirely.
+    "COMPANY_NAME_FALLBACK": "true",
+
+    // Optional ICP override. Leave empty and the versioned default in
+    // src/icp.ts is used (edit that — it is prose, and it belongs in diffs).
+    // The extension's own ICP field still wins over both.
+    "DEFAULT_ICP": "",
+
+    // Hard ceiling on contacts in a single run.
+    "MAX_CONTACTS_PER_JOB": "1000",
+
+    // Per-token daily ceilings. The API keys live in this worker, so a leaked
+    // token spends real money — these bound the damage. One 1000-contact run
+    // is ~4,300 Harvest calls and ~1,000 scoring calls.
+    "DAILY_HARVEST_CALL_LIMIT": "20000",
+    "DAILY_LLM_CALL_LIMIT": "5000",
+
+    // Comma-separated chrome-extension:// origins allowed to call this Worker.
+    // "*" allows any origin (the bearer token is still required).
+    "ALLOWED_ORIGINS": "*"
+  }
+
+  // ─── Secrets (NEVER put these in this file) ───
+  //   wrangler secret put HARVEST_API_KEY
+  //   wrangler secret put OPENROUTER_API_KEY
+}

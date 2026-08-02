@@ -1,0 +1,5 @@
+# Local development secrets. Copy to .dev.vars (which is gitignored) for `wrangler dev`.
+# In production these are set with `wrangler secret put`, never committed.
+
+HARVEST_API_KEY=your-harvestapi-key
+OPENROUTER_API_KEY=sk-or-v1-...

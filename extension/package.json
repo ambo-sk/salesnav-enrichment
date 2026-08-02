@@ -1,0 +1,29 @@
+{
+  "name": "salesnav-enrichment-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chrome extension: scrape LinkedIn Sales Navigator and hand the list to a Cloudflare enrichment worker",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "test": "esbuild test/selfcheck.ts --bundle --platform=node --format=esm --outfile=.selfcheck.mjs --log-level=warning && node .selfcheck.mjs",
+    "smoke": "esbuild test/smoke.ts --bundle --platform=node --format=esm --outfile=.smoke.mjs --log-level=warning && node .smoke.mjs"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.21",
+    "@types/chrome": "^0.0.258",
+    "@types/react": "^18.2.47",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.11",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  }
+}
