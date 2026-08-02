@@ -14,12 +14,14 @@
     "enabled": true
   },
 
-  // ─── D1: users, tokens (hashed), jobs, usage log ───
+  // ─── D1: users, tokens (hashed), daily quota, run log ───
+  // Located in WEUR — the data is UK/EU-operated even though it is only
+  // credentials metadata and counters (no contact data ever lands here).
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "salesnav-enrichment",
-      "database_id": "d6f1dd83-a79a-4afa-be50-349ae3383f3e"
+      "database_name": "salesnav-enrichment-eu",
+      "database_id": "d394c247-4a7b-4732-801d-3063837a3989"
     }
   ],
 

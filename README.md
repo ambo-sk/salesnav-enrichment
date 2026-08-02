@@ -74,7 +74,7 @@ cd worker
 npm install
 
 # create the resources (D1 only — no R2, no Workflows)
-npx wrangler d1 create salesnav-enrichment          # paste the id into wrangler.jsonc
+npx wrangler d1 create salesnav-enrichment-eu --location weur   # paste the id into wrangler.jsonc
 npm run db:init
 
 # secrets — these never reach the browser
@@ -85,7 +85,11 @@ npm run deploy
 ```
 
 Set `HARVEST_CONCURRENCY` in `wrangler.jsonc` to your HarvestAPI plan's concurrency
-(free 1 / starter 5 / basic 10 / pro 20 / business 40). It doubles as the workflow chunk size.
+(free 1 / starter 5 / basic 10 / pro 20 / business 40). It also bounds the run's chunk size.
+
+`--location weur` keeps the database in Western Europe. It holds only credential hashes, quota
+counters and run metadata — no contact data ever reaches it — but there is no reason for it to
+live elsewhere.
 
 ### 2. Mint a token
 
@@ -183,11 +187,11 @@ Every proxied call is metered, and every run is logged:
 
 ```bash
 # per-user daily spend
-npx wrangler d1 execute salesnav-enrichment --remote --command \
+npx wrangler d1 execute salesnav-enrichment-eu --remote --command \
   "SELECT * FROM daily_usage ORDER BY day DESC"
 
 # per-run history
-npx wrangler d1 execute salesnav-enrichment --remote --command \
+npx wrangler d1 execute salesnav-enrichment-eu --remote --command \
   "SELECT user_id, label, status, contact_count, scored_count, harvest_calls, llm_calls, created_at
      FROM runs ORDER BY created_at DESC LIMIT 20"
 ```
