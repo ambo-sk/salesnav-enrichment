@@ -213,7 +213,10 @@ const Popup: React.FC = () => {
     }
   };
 
-  const runAction = async (action: 'START_ENRICHMENT' | 'STOP_ENRICHMENT' | 'DISCARD_RUN', busyLabel: string) => {
+  const runAction = async (
+    action: 'START_ENRICHMENT' | 'STOP_ENRICHMENT' | 'DISCARD_RUN' | 'RESCORE_RUN',
+    busyLabel: string,
+  ) => {
     setError('');
     setBusy(busyLabel);
     try {
@@ -486,6 +489,14 @@ const Popup: React.FC = () => {
             <>
               <button className="btn btn-download" onClick={handleDownload} disabled={busy !== ''}>
                 {busy === 'download' ? 'Building…' : 'Download Excel'}
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => runAction('RESCORE_RUN', 'rescore')}
+                disabled={busy !== ''}
+                title="Score these contacts again against the current model and ICP. Reuses the enrichment already paid for — no HarvestAPI calls."
+              >
+                {busy === 'rescore' ? 'Re-scoring…' : 'Re-score contacts'}
               </button>
               <button
                 className="btn btn-secondary"

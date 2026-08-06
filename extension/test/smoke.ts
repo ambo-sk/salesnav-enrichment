@@ -7,8 +7,8 @@
  *   WORKER_URL=https://... API_TOKEN=snv_... npm run smoke -- <linkedin-url> [...]
  *
  * Drives the same runner the background service worker uses, so it exercises
- * the whole path: proxy auth, the Harvest proxy, pagination, the company dedup,
- * the dossier, the scoring proxy, the run state machine and the workbook.
+ * the whole path: proxy auth, the Harvest proxy, the company dedup, the
+ * dossier, the scoring proxy, the run state machine and the workbook.
  */
 
 import assert from 'node:assert/strict';
@@ -81,11 +81,6 @@ async function main() {
       item.enriched.input.linkedin_url;
     console.log(`\n${'─'.repeat(70)}\n${name}`);
     console.log(`  company : ${item.enriched.companyKey ?? '(none)'} -> ${item.company?.name ?? '(unresolved)'}`);
-    console.log(
-      `  activity: ${item.enriched.activity.postCount} posts, ` +
-        `${item.enriched.activity.commentCount} comments, ` +
-        `${item.enriched.activity.reactionCount} reactions`,
-    );
     if (item.enriched.errors.length) console.log(`  gaps    : ${item.enriched.errors.join(' | ')}`);
     if (!item.score) {
       console.log(`  SCORING FAILED: ${item.scoreError}`);

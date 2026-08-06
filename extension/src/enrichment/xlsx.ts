@@ -1,9 +1,8 @@
 /**
  * Workbook builder.
  *
- * Three sheets:
+ * Two sheets:
  *   Scored Contacts — one row per person, sorted best fit first
- *   Activity        — one row per post/comment inside the 6-month window
  *   Run Info        — job metadata, the ICP used, and a data-quality summary
  *
  * Rows are emitted one at a time into a streaming zip (see zip.ts) rather than
@@ -17,7 +16,7 @@
  */
 
 import type { HarvestCompany, HarvestProfile, ScoredContact } from './harvest-types';
-import { currentPositions, industryNames } from './enrich';
+import { currentPositions } from './enrich';
 import { dosStamp, zip, type ZipEntry } from './zip';
 
 export interface WorkbookMeta {
@@ -163,36 +162,58 @@ function* sheetXml(spec: SheetSpec): Generator<string> {
 
 // ─── Field extraction ───
 
-function locationOf(profile: HarvestProfile | null): string {
-  if (!profile?.location) return '';
-  if (typeof profile.location === 'string') return profile.location;
-  return profile.location.linkedinText ?? '';
-}
-
-function primaryEmail(profile: HarvestProfile | null): { email: string; status: string } {
-  const entries = profile?.emails ?? [];
-  for (const entry of entries) {
-    if (typeof entry === 'string' && entry) return { email: entry, status: '' };
-    if (entry && typeof entry === 'object' && entry.email) {
-      return { email: entry.email, status: entry.status ?? (entry.deliverable ? 'deliverable' : '') };
-    }
-  }
-  return { email: '', status: '' };
-}
-
-function employeeCountOf(company: HarvestCompany | null): Cell {
-  if (!company) return '';
-  if (typeof company.employeeCount === 'number') return company.employeeCount;
-  const range = company.employeeCountRange;
-  if (range?.start || range?.end) return `${range?.start ?? '?'}-${range?.end ?? '?'}`;
-  return '';
+function officeOf(location: NonNullable<HarvestCompany['locations']>[number]): string {
+  return [location.city, location.geographicArea, location.country].filter(Boolean).join(', ');
 }
 
 function headquartersOf(company: HarvestCompany | null): string {
   const locations = company?.locations ?? [];
   const hq = locations.find((l) => l.headquarter) ?? locations[0];
-  if (!hq) return '';
-  return [hq.city, hq.country].filter(Boolean).join(', ');
+  return hq ? officeOf(hq) : '';
+}
+
+/** Every office, HQ first, deduped — the HQ line repeats in `locations`. */
+function officesOf(company: HarvestCompany | null): string {
+  const seen = new Set<string>();
+  for (const location of company?.locations ?? []) {
+    const text = officeOf(location);
+    if (text) seen.add(text);
+  }
+  return [...seen].join(' | ');
+}
+
+/**
+ * Every role the person still holds, as "Company — Title (start year)".
+ *
+ * `currentPosition` alone under-reports: it carries one entry on most live
+ * responses, so open-ended `experience` rows are merged in and deduped by
+ * company + role.
+ */
+function currentExperiences(profile: HarvestProfile | null): string {
+  const open = [
+    ...currentPositions(profile),
+    ...(profile?.experience ?? []).filter((e) => !e.endDate?.year),
+  ];
+
+  const seen = new Map<string, string>();
+  for (const position of open) {
+    const company = position.companyName ?? '';
+    const role = position.position ?? '';
+    if (!company && !role) continue;
+    const year = position.startDate?.year;
+    const who = company && role ? `${company} — ${role}` : company || role;
+    const label = [who, year ? `(${year})` : ''].filter(Boolean).join(' ');
+    seen.set(`${company.toLowerCase()}|${role.toLowerCase()}`, label);
+  }
+  return [...seen.values()].join(' | ');
+}
+
+/** "Jane Doe" -> first "Jane", last "Doe". Only used when the profile lookup
+ *  failed and the scraped row is all we have. */
+function splitName(name: string): { first: string; last: string } {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { first: '', last: '' };
+  return { first: parts[0], last: parts.slice(1).join(' ') };
 }
 
 function tenureMonths(profile: HarvestProfile | null, now: number): Cell {
@@ -206,73 +227,43 @@ function tenureMonths(profile: HarvestProfile | null, now: number): Cell {
 }
 
 const CONTACT_COLUMNS: { header: string; width: number }[] = [
-  { header: 'Fit Score', width: 10 },
-  { header: 'Tier', width: 6 },
-  { header: 'Verdict', width: 14 },
-  { header: 'Confidence', width: 11 },
-  { header: 'Name', width: 24 },
-  { header: 'Title', width: 34 },
-  { header: 'Company', width: 26 },
-  { header: 'Seniority', width: 16 },
-  { header: 'Buying Role', width: 16 },
-  { header: 'Rationale', width: 60 },
-  { header: 'Positive Signals', width: 50 },
-  { header: 'Risks', width: 44 },
-  { header: 'Activity Themes', width: 36 },
-  { header: 'Personalized Hook', width: 60 },
-  { header: 'Recommended Channel', width: 20 },
-
-  { header: 'Posts (6mo)', width: 12 },
-  { header: 'Original Posts', width: 14 },
-  { header: 'Reposts', width: 9 },
-  { header: 'Comments (6mo)', width: 15 },
-  { header: 'Reactions (recent)', width: 17 },
-  { header: 'Total Engagement', width: 17 },
-  { header: 'Avg Engagement/Post', width: 19 },
-  { header: 'Posts / Month', width: 13 },
-  { header: 'Last Activity', width: 22 },
-  { header: 'Active in Window', width: 16 },
-
-  { header: 'Headline', width: 44 },
-  { header: 'About', width: 60 },
-  { header: 'Location', width: 26 },
-  { header: 'Followers', width: 11 },
-  { header: 'Connections', width: 12 },
-  { header: 'Open To Work', width: 13 },
-  { header: 'Hiring', width: 8 },
-  { header: 'Premium', width: 9 },
-  { header: 'Current Role', width: 34 },
-  { header: 'Current Company', width: 26 },
-  { header: 'Tenure (months)', width: 15 },
-  { header: 'Top Skills', width: 44 },
-  { header: 'Education', width: 40 },
-  { header: 'Email', width: 30 },
-  { header: 'Email Status', width: 14 },
-
-  { header: 'Company Industry', width: 26 },
-  { header: 'Company Employees', width: 18 },
-  { header: 'Company Size Range', width: 18 },
-  { header: 'Company Followers', width: 17 },
+  { header: 'Personal Linkedin URL', width: 46 },
+  { header: 'First Name', width: 18 },
+  { header: 'Last Name', width: 20 },
+  { header: 'Job Title', width: 34 },
+  { header: 'Company Name', width: 26 },
+  { header: 'Website', width: 34 },
   { header: 'Company Type', width: 16 },
-  { header: 'Company Founded', width: 15 },
   { header: 'Company HQ', width: 26 },
-  { header: 'Company Website', width: 34 },
-  { header: 'Company Specialities', width: 50 },
-  { header: 'Company Description', width: 60 },
-  { header: 'Company LinkedIn', width: 40 },
-
-  { header: 'LinkedIn URL', width: 46 },
-  { header: 'Sales Nav URL', width: 46 },
-  { header: 'Public Identifier', width: 24 },
-  { header: 'Harvest Calls', width: 13 },
-  { header: 'Data Gaps', width: 44 },
+  { header: 'Company offices', width: 50 },
+  { header: 'Company Linkedin URL', width: 40 },
+  { header: 'Email', width: 34 },
+  { header: 'Direct Phone', width: 22 },
+  { header: 'Mobile Phone', width: 22 },
+  { header: 'Contact Accuracy', width: 16 },
+  { header: 'Personalized Hook', width: 60 },
+  { header: 'Top Skills', width: 44 },
+  { header: 'Tenure (months)', width: 15 },
+  { header: 'Rationale', width: 60 },
+  { header: 'Current Experiences', width: 60 },
 ];
 
+/**
+ * Phone numbers carry their do-not-call status into the cell. Similarweb
+ * returns the flag as a sibling field, and a number exported without it reads
+ * as callable — whoever works the sheet has to see the restriction.
+ */
+function phoneList(numbers: string[], doNotCall: boolean | null): string {
+  if (numbers.length === 0) return '';
+  const joined = numbers.join(', ');
+  return doNotCall ? `${joined} (DNC)` : joined;
+}
+
 function contactRow(item: ScoredContact, now: number): Cell[] {
-  const { enriched, company, score, scoreError } = item;
-  const { profile, activity, input } = enriched;
+  const { enriched, company, score, contact } = item;
+  const { profile, input } = enriched;
   const [position] = currentPositions(profile);
-  const email = primaryEmail(profile);
+  const scraped = splitName(input.name ?? '');
 
   const skills = (profile?.skills ?? [])
     .map((s) => s.name)
@@ -280,147 +271,27 @@ function contactRow(item: ScoredContact, now: number): Cell[] {
     .slice(0, 12)
     .join(', ');
 
-  const education = (profile?.education ?? [])
-    .slice(0, 3)
-    .map((school) => [school.schoolName, school.degree, school.fieldOfStudy].filter(Boolean).join(' — '))
-    .join(' | ');
-
-  const founded = company?.foundedOn?.year ? String(company.foundedOn.year) : '';
-
-  const gaps = [...enriched.errors];
-  if (scoreError) gaps.push(`scoring: ${scoreError}`);
-
   return [
-    cell(score?.fit_score ?? ''),
-    cell(score?.tier ?? ''),
-    cell(score?.verdict ?? (scoreError ? 'scoring_failed' : '')),
-    cell(score?.confidence ?? ''),
-    cell([profile?.firstName, profile?.lastName].filter(Boolean).join(' ') || input.name || ''),
+    cell(profile?.linkedinUrl || input.linkedin_url),
+    cell(profile?.firstName || scraped.first),
+    cell(profile?.lastName || scraped.last),
     cell(position?.position || input.title || profile?.headline || ''),
     cell(company?.name || position?.companyName || input.company || ''),
-    cell(score?.seniority ?? ''),
-    cell(score?.buying_role ?? ''),
-    cell(score?.rationale ?? ''),
-    cell((score?.positive_signals ?? []).join(' | ')),
-    cell((score?.risks ?? []).join(' | ')),
-    cell((score?.activity_themes ?? []).join(' | ')),
-    cell(score?.personalized_hook ?? ''),
-    cell(score?.recommended_channel ?? ''),
-
-    cell(activity.postCount),
-    cell(activity.originalPostCount),
-    cell(activity.repostCount),
-    cell(activity.commentCount),
-    cell(activity.reactionCount),
-    cell(activity.totalEngagement),
-    cell(activity.avgEngagementPerPost),
-    cell(activity.postsPerMonth),
-    cell(activity.lastActivityIso ?? ''),
-    cell(activity.isActive),
-
-    cell(profile?.headline ?? ''),
-    cell(profile?.about ?? ''),
-    cell(locationOf(profile) || input.location || ''),
-    cell(profile?.followerCount ?? ''),
-    cell(profile?.connectionsCount ?? ''),
-    cell(profile?.openToWork ?? ''),
-    cell(profile?.hiring ?? ''),
-    cell(profile?.premium ?? ''),
-    cell(position?.position ?? ''),
-    cell(position?.companyName ?? ''),
-    cell(tenureMonths(profile, now)),
-    cell(skills),
-    cell(education),
-    cell(email.email),
-    cell(email.status),
-
-    cell(industryNames(company).join(', ')),
-    cell(employeeCountOf(company)),
-    cell(
-      company?.employeeCountRange
-        ? `${company.employeeCountRange.start ?? '?'}-${company.employeeCountRange.end ?? '?'}`
-        : '',
-    ),
-    cell(company?.followerCount ?? ''),
-    cell(company?.companyType ?? ''),
-    cell(founded),
-    cell(headquartersOf(company)),
     cell(company?.website ?? ''),
-    cell((company?.specialities ?? []).join(', ')),
-    cell(company?.description ?? ''),
+    cell(company?.companyType ?? ''),
+    cell(headquartersOf(company)),
+    cell(officesOf(company)),
     cell(company?.linkedinUrl ?? ''),
-
-    cell(profile?.linkedinUrl ?? ''),
-    cell(input.linkedin_url),
-    cell(profile?.publicIdentifier ?? ''),
-    cell(enriched.harvestCalls),
-    cell(gaps.join(' | ')),
+    cell((contact?.emails ?? []).join(', ')),
+    cell(phoneList(contact?.directPhones ?? [], contact?.directPhoneDoNotCall ?? null)),
+    cell(phoneList(contact?.mobilePhones ?? [], contact?.mobilePhoneDoNotCall ?? null)),
+    cell(contact?.accuracyScore ?? ''),
+    cell(score?.personalized_hook ?? ''),
+    cell(skills),
+    cell(tenureMonths(profile, now)),
+    cell(score?.rationale ?? ''),
+    cell(currentExperiences(profile)),
   ];
-}
-
-const ACTIVITY_COLUMNS: { header: string; width: number }[] = [
-  { header: 'Name', width: 24 },
-  { header: 'Company', width: 26 },
-  { header: 'Type', width: 10 },
-  { header: 'Date', width: 22 },
-  { header: 'Engagement', width: 12 },
-  { header: 'Likes', width: 8 },
-  { header: 'Comments', width: 10 },
-  { header: 'Shares', width: 8 },
-  { header: 'Text', width: 90 },
-  { header: 'URL', width: 46 },
-  { header: 'Sales Nav URL', width: 46 },
-];
-
-function* activityRows(items: ScoredContact[]): Generator<Cell[]> {
-  for (const item of items) {
-    const { enriched, company } = item;
-    const name =
-      [enriched.profile?.firstName, enriched.profile?.lastName].filter(Boolean).join(' ') ||
-      enriched.input.name ||
-      '';
-    const companyName = company?.name || enriched.input.company || '';
-
-    for (const post of enriched.posts) {
-      yield [
-        cell(name),
-        cell(companyName),
-        cell(post.isRepost ? 'repost' : 'post'),
-        cell(post.postedAtIso ?? ''),
-        cell(post.totalEngagement),
-        cell(post.likes),
-        cell(post.comments),
-        cell(post.shares),
-        cell(post.text),
-        cell(post.url),
-        cell(enriched.input.linkedin_url),
-      ];
-    }
-
-    for (const comment of enriched.comments) {
-      yield [
-        cell(name),
-        cell(companyName),
-        cell('comment'),
-        cell(comment.postedAtIso ?? ''),
-        '',
-        '',
-        '',
-        '',
-        cell(comment.text),
-        cell(comment.url),
-        cell(enriched.input.linkedin_url),
-      ];
-    }
-  }
-}
-
-function countActivityRows(items: ScoredContact[]): number {
-  let total = 0;
-  for (const item of items) {
-    total += item.enriched.posts.length + item.enriched.comments.length;
-  }
-  return total;
 }
 
 // ─── Static OOXML parts ───
@@ -434,7 +305,6 @@ const CONTENT_TYPES =
   '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
   '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
   '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
-  '<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
   '</Types>';
 
 const ROOT_RELS =
@@ -448,11 +318,10 @@ const WORKBOOK_RELS =
   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
   '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
   '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>' +
-  '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>' +
-  '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+  '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
   '</Relationships>';
 
-const SHEET_NAMES = ['Scored Contacts', 'Activity', 'Run Info'];
+const SHEET_NAMES = ['Scored Contacts', 'Run Info'];
 
 const WORKBOOK =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
@@ -498,7 +367,6 @@ export async function buildWorkbook(
   const scored = items.filter((i) => i.score).length;
   const withProfile = items.filter((i) => i.enriched.profile).length;
   const withCompany = items.filter((i) => i.company).length;
-  const withActivity = items.filter((i) => i.enriched.activity.isActive).length;
   const tierCount = (tier: string) => items.filter((i) => i.score?.tier === tier).length;
   const harvestCalls = items.reduce((sum, i) => sum + i.enriched.harvestCalls, 0);
 
@@ -508,12 +376,17 @@ export async function buildWorkbook(
     ['Created (UTC)', meta.createdAt],
     ['Finished (UTC)', meta.finishedAt],
     ['Scoring model', meta.model],
-    ['Activity window', '6 months'],
     ['', ''],
     ['Contacts submitted', items.length],
     ['Profile resolved', withProfile],
     ['Company resolved', withCompany],
-    ['Active on LinkedIn (6mo)', withActivity],
+    ['Email found', items.filter((i) => (i.contact?.emails.length ?? 0) > 0).length],
+    [
+      'Phone found',
+      items.filter(
+        (i) => (i.contact?.directPhones.length ?? 0) + (i.contact?.mobilePhones.length ?? 0) > 0,
+      ).length,
+    ],
     ['Successfully scored', scored],
     ['Scoring failed', items.length - scored],
     ['HarvestAPI calls', harvestCalls],
@@ -531,13 +404,6 @@ export async function buildWorkbook(
       columns: CONTACT_COLUMNS,
       rows: () => sorted.map((item) => contactRow(item, now)),
       rowCount: sorted.length,
-      freezeHeader: true,
-      autoFilter: true,
-    },
-    {
-      columns: ACTIVITY_COLUMNS,
-      rows: () => activityRows(sorted),
-      rowCount: countActivityRows(sorted),
       freezeHeader: true,
       autoFilter: true,
     },

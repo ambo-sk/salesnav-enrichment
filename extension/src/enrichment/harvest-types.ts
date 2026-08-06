@@ -7,6 +7,8 @@
  * never break a build here.
  */
 
+import type { ContactInfo } from './contacts';
+
 
 
 /** One scraped row as the extension sends it. */
@@ -23,17 +25,8 @@ export interface InboundContact {
 export interface HarvestEnvelope<T> {
   element?: T;
   elements?: T[];
-  pagination?: HarvestPagination;
   status?: string;
   error?: string;
-}
-
-export interface HarvestPagination {
-  totalPages?: number;
-  totalElements?: number;
-  pageNumber?: number;
-  pageSize?: number;
-  paginationToken?: string | null;
 }
 
 export interface HarvestDate {
@@ -138,39 +131,6 @@ export interface HarvestCompany {
   paidCompany?: boolean;
 }
 
-export interface HarvestPost {
-  id?: string;
-  content?: string;
-  linkedinUrl?: string;
-  postedAt?: { timestamp?: number; date?: string; postedAgo?: string } | string;
-  repostId?: string | null;
-  repost?: boolean;
-  article?: { title?: string; url?: string } | null;
-  engagement?: {
-    likes?: number;
-    comments?: number;
-    shares?: number;
-    reactions?: number;
-  };
-}
-
-export interface HarvestComment {
-  id?: string;
-  linkedinUrl?: string;
-  commentary?: string;
-  createdAt?: string;
-  createdAtTimestamp?: number;
-  numComments?: number;
-  postId?: string;
-}
-
-export interface HarvestReaction {
-  id?: string;
-  reactionType?: string;
-  postId?: string;
-  actor?: { name?: string; linkedinUrl?: string; position?: string };
-}
-
 // ─── Normalized pipeline shapes ───
 
 /** Everything gathered for one person, before scoring. */
@@ -181,45 +141,8 @@ export interface EnrichedContact {
   profile: HarvestProfile | null;
   /** universalName of the current employer, used to join the company cache. */
   companyKey: string | null;
-  posts: NormalizedPost[];
-  comments: NormalizedComment[];
-  activity: ActivityStats;
   errors: string[];
   harvestCalls: number;
-}
-
-export interface NormalizedPost {
-  url: string;
-  postedAtIso: string | null;
-  postedAtMs: number | null;
-  isRepost: boolean;
-  text: string;
-  likes: number;
-  comments: number;
-  shares: number;
-  totalEngagement: number;
-}
-
-export interface NormalizedComment {
-  url: string;
-  postedAtIso: string | null;
-  postedAtMs: number | null;
-  text: string;
-}
-
-export interface ActivityStats {
-  windowMonths: number;
-  postCount: number;
-  originalPostCount: number;
-  repostCount: number;
-  commentCount: number;
-  reactionCount: number;
-  totalEngagement: number;
-  avgEngagementPerPost: number;
-  lastActivityIso: string | null;
-  postsPerMonth: number;
-  /** true when the person published or commented at all inside the window. */
-  isActive: boolean;
 }
 
 /** LLM verdict for one contact. */
@@ -232,7 +155,6 @@ export interface Score {
   rationale: string;
   positive_signals: string[];
   risks: string[];
-  activity_themes: string[];
   personalized_hook: string;
   recommended_channel: string;
   confidence: 'high' | 'medium' | 'low';
@@ -244,5 +166,7 @@ export interface ScoredContact {
   company: HarvestCompany | null;
   score: Score | null;
   scoreError: string | null;
+  /** Similarweb emails and phones. Null when not looked up or not found. */
+  contact: ContactInfo | null;
 }
 

@@ -22,6 +22,8 @@ export type MessageAction =
   | 'START_ENRICHMENT'
   | 'STOP_ENRICHMENT'
   | 'DISCARD_RUN'
+  // popup -> background: score a finished run again, reusing its enrichment
+  | 'RESCORE_RUN'
   // background -> popup: enrichment failed
   | 'ENRICHMENT_ERROR';
 
@@ -108,7 +110,7 @@ export interface WorkerContact {
  *  full run state is megabytes and stays in chrome.storage. */
 export interface RunSummary {
   active: boolean;
-  phase: 'enriching' | 'companies' | 'scoring' | 'complete' | 'error' | 'stopped';
+  phase: 'enriching' | 'companies' | 'contacts' | 'scoring' | 'complete' | 'error' | 'stopped';
   phaseLabel: string;
   done: number;
   total: number;

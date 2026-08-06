@@ -27,23 +27,12 @@
 
   "vars": {
     // Model used for ICP scoring. Any OpenRouter slug.
-    "OPENROUTER_MODEL": "anthropic/claude-sonnet-5",
+    "OPENROUTER_MODEL": "google/gemini-2.5-flash",
 
     // Must be <= your HarvestAPI plan's concurrency
     // (free 1 / starter 5 / basic 10 / pro 20 / business 40).
     // Also used as the workflow chunk size.
     "HARVEST_CONCURRENCY": "5",
-
-    // Max pages of posts / comments / reactions pulled per contact.
-    // Each page is one HarvestAPI call (one credit).
-    "MAX_POST_PAGES": "3",
-    "MAX_COMMENT_PAGES": "2",
-    "MAX_REACTION_PAGES": "1",
-
-    // Reactions carry no timestamp in the HarvestAPI response, so they cannot
-    // be scoped to 6 months — they are pulled as "recent, undated" signal.
-    // Set to "false" to save one credit per contact.
-    "INCLUDE_REACTIONS": "true",
 
     // Ask HarvestAPI to find + SMTP-verify a work email (costs extra credits).
     "FIND_EMAIL": "false",
@@ -63,7 +52,8 @@
 
     // Per-token daily ceilings. The API keys live in this worker, so a leaked
     // token spends real money — these bound the damage. One 1000-contact run
-    // is ~4,300 Harvest calls and ~1,000 scoring calls.
+    // is ~1,300 Harvest calls (profile + deduped company) and ~1,000 scoring
+    // calls now that no activity is pulled.
     "DAILY_HARVEST_CALL_LIMIT": "20000",
     "DAILY_LLM_CALL_LIMIT": "5000",
 

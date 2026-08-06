@@ -198,12 +198,18 @@ export async function zip(entries: ZipEntry[], stamp: DosStamp): Promise<Uint8Ar
     raw(entry.nameBytes);
   }
 
+  // Capture the directory's size BEFORE the EOCD is written: `pos` advances as
+  // the record is emitted, and reading it inside the record overstates the
+  // directory by the 12 bytes already written. Excel repairs such a file rather
+  // than opening it.
+  const centralSize = pos - centralStart;
+
   u32(0x06054b50);
   u16(0);
   u16(0);
   u16(staged.length);
   u16(staged.length);
-  u32(pos - centralStart);
+  u32(centralSize);
   u32(centralStart);
   u16(0);
 

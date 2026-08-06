@@ -257,7 +257,7 @@ const Options: React.FC = () => {
             />
             <p className="form-help">
               Scoring returns fit score 0-100, tier A-D, buying role, signals, risks, and a
-              personalized opening line grounded in the contact's own LinkedIn activity.
+              personalized opening line grounded in the contact's profile and company record.
               The exact text used is recorded on the workbook's Run Info sheet.
             </p>
           </div>
@@ -418,8 +418,8 @@ const Options: React.FC = () => {
           <li>Click the extension icon, set a run label, press "Start Scraping"</li>
           <li>When the run ends, the contacts are sent to your Cloudflare worker</li>
           <li>
-            The worker pulls each LinkedIn profile, the company record, and 6 months of posts and
-            comments from HarvestAPI, then scores every contact against your ICP
+            The worker pulls each LinkedIn profile and the company record from HarvestAPI — no
+            posts, comments or reactions — then scores every contact against your ICP
           </li>
           <li>When the job finishes, an "Excel" button appears in the popup — click to download</li>
         </ol>
@@ -430,8 +430,7 @@ const Options: React.FC = () => {
 
         <h3>What lands in the workbook</h3>
         <ul>
-          <li><strong>Scored Contacts</strong> — one row per person: fit score, tier, buying role, rationale, signals, risks, a personalized hook, plus the full profile, company, and activity summary</li>
-          <li><strong>Activity</strong> — one row per post and comment from the last 6 months</li>
+          <li><strong>Scored Contacts</strong> — one row per person, best fit first: LinkedIn URL, name, job title, company (website, type, HQ, offices, LinkedIn), personalized hook, top skills, tenure, rationale and current roles</li>
           <li><strong>Run Info</strong> — job metadata, the ICP used, and data-quality counts</li>
         </ul>
       </div>

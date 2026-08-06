@@ -12,14 +12,12 @@ export interface Env {
   // Secrets — never leave the worker
   HARVEST_API_KEY: string;
   OPENROUTER_API_KEY: string;
+  /** Optional. Absent = the contacts phase is reported off in GET /config. */
+  SIMILARWEB_API_KEY: string;
 
   // Vars
   OPENROUTER_MODEL: string;
   HARVEST_CONCURRENCY: string;
-  MAX_POST_PAGES: string;
-  MAX_COMMENT_PAGES: string;
-  MAX_REACTION_PAGES: string;
-  INCLUDE_REACTIONS: string;
   FIND_EMAIL: string;
   COMPANY_NAME_FALLBACK: string;
   DEFAULT_ICP: string;
@@ -40,13 +38,11 @@ export interface ClientConfig {
   icp: string;
   model: string;
   harvestConcurrency: number;
-  maxPostPages: number;
-  maxCommentPages: number;
-  maxReactionPages: number;
-  includeReactions: boolean;
   findEmail: boolean;
   companyNameFallback: boolean;
   maxContactsPerRun: number;
+  /** Similarweb contact enrichment is configured — run the contacts phase. */
+  findContacts: boolean;
 }
 
 /** A run, as reported by the extension when it starts and finishes. */
@@ -77,7 +73,6 @@ export interface Score {
   rationale: string;
   positive_signals: string[];
   risks: string[];
-  activity_themes: string[];
   personalized_hook: string;
   recommended_channel: string;
   confidence: 'high' | 'medium' | 'low';

@@ -15,10 +15,6 @@ import { currentPositions, industryNames } from './enrich';
 const LIMITS = {
   about: 1500,
   companyDescription: 1200,
-  postText: 600,
-  commentText: 300,
-  posts: 15,
-  comments: 10,
   experience: 6,
   education: 3,
   skills: 15,
@@ -47,7 +43,7 @@ function formatDate(date?: { month?: number | null; year?: number | null; text?:
 /** Human-readable dossier. Plain text beats JSON here: fewer tokens, and the
  *  model does not need to re-derive structure it will not echo back. */
 export function buildDossier(enriched: EnrichedContact, company: HarvestCompany | null): string {
-  const { input, profile, activity, posts, comments } = enriched;
+  const { input, profile } = enriched;
   const lines: string[] = [];
 
   lines.push('## SCRAPED FROM SALES NAVIGATOR');
@@ -147,45 +143,19 @@ export function buildDossier(enriched: EnrichedContact, company: HarvestCompany 
     if (founded) lines.push(`Founded: ${founded}`);
     const hq = (company.locations ?? []).find((l) => l.headquarter) ?? company.locations?.[0];
     if (hq) lines.push(`HQ: ${[hq.city, hq.country].filter(Boolean).join(', ')}`);
+    // Offices across several countries are the strongest cross-border tell the
+    // record carries, and the ICP scores on it.
+    const offices = new Set(
+      (company.locations ?? [])
+        .map((l) => [l.city, l.geographicArea, l.country].filter(Boolean).join(', '))
+        .filter(Boolean),
+    );
+    if (offices.size) lines.push(`Offices: ${[...offices].slice(0, 20).join(' | ')}`);
     if (company.specialities?.length) {
       lines.push(`Specialities: ${company.specialities.slice(0, LIMITS.specialities).join(', ')}`);
     }
     const description = truncate(company.description, LIMITS.companyDescription);
     if (description) lines.push(`Description: ${description}`);
-  }
-
-  lines.push('');
-  lines.push(`## LINKEDIN ACTIVITY (last ${activity.windowMonths} months)`);
-  lines.push(
-    `Posts: ${activity.postCount} (${activity.originalPostCount} original, ${activity.repostCount} reposts) | ` +
-      `Comments: ${activity.commentCount} | Reactions: ${activity.reactionCount} | ` +
-      `Avg engagement/post: ${activity.avgEngagementPerPost} | ` +
-      `Last activity: ${activity.lastActivityIso ?? 'none in window'}`,
-  );
-
-  if (posts.length) {
-    lines.push('');
-    lines.push('Recent posts:');
-    for (const post of posts.slice(0, LIMITS.posts)) {
-      const date = post.postedAtIso?.slice(0, 10) ?? 'undated';
-      const kind = post.isRepost ? 'repost' : 'post';
-      const text = truncate(post.text, LIMITS.postText) || '(no text — image/video only)';
-      lines.push(`  - [${date}] (${kind}, ${post.totalEngagement} engagements) ${text}`);
-    }
-  }
-
-  if (comments.length) {
-    lines.push('');
-    lines.push('Recent comments:');
-    for (const comment of comments.slice(0, LIMITS.comments)) {
-      const date = comment.postedAtIso?.slice(0, 10) ?? 'undated';
-      const text = truncate(comment.text, LIMITS.commentText);
-      if (text) lines.push(`  - [${date}] ${text}`);
-    }
-  }
-
-  if (!posts.length && !comments.length) {
-    lines.push('(no posts or comments found in the window)');
   }
 
   if (enriched.errors.length) {

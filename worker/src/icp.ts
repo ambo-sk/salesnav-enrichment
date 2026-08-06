@@ -106,9 +106,8 @@ Roughly, in descending order of importance:
 3. Is there a concrete, dated trigger — expansion, funding, ERP change, finance hiring, an
    explicit complaint about banking or FX?
 4. Does the company match a sector where we already have a reference to lean on?
-5. Is the person visible and engaged on LinkedIn (gives us a warm way in)? This is a tiebreaker,
-   never a substitute for 1-3. A silent CFO at a perfect-fit company still outranks a prolific
-   poster at a domestic one.
+5. Is there something concrete to open with — tenure, a recent move, a stated focus in the
+   headline or about section? This is a tiebreaker for the hook, never a substitute for 1-3.
 
 Seniority without company fit is a weak lead. Company fit without seniority is a routable lead —
 score it mid-range and let the buying_role field say who to go around them to.
@@ -134,25 +133,29 @@ score it mid-range and let the buying_role field say who to go around them to.
 - Someone who started their current role under ~3 months ago: still a fit, but say so in risks
   and drop confidence, since they will not own the budget yet.
 
-## USING THE ACTIVITY WINDOW
+## WHAT THE DOSSIER CONTAINS
 
-The dossier carries 6 months of the person's posts and comments. Mine it for:
-- Explicit pain: FX costs, spreads, hedging, bank delays, SWIFT, failed or delayed payments,
-  reconciliation, month-end close, idle cash, interest rates, working capital.
-- Expansion: new market, new office, new entity, international hires, "we're now live in X".
-- Change events: funding round, ERP or accounting migration, new finance leadership,
-  acquisition, a systems or process overhaul.
-- Motion B tells: embedded finance, payouts, marketplace infrastructure, API integrations,
-  "we built X in-house".
-Absence of activity is NOT a negative signal about fit — most finance leaders post rarely. It
-only lowers what we can personalize with, so it should reduce confidence and change the hook,
-not the fit_score.
+The person's LinkedIn profile and their company's record. There are NO posts, comments or
+reactions — never reference their LinkedIn activity, and never infer a "recent" event that is
+not dated in the profile itself. Mine what is there:
+- Headline and about: stated remit (treasury, payments, FX, expansion), and explicit pain.
+- Current role and start date: a long tenure means budget ownership; a fresh one means the
+  opposite. A recent move is itself a dated trigger.
+- Experience history: prior employers in payments or cross-border sectors mean the concepts
+  land without education.
+- Company record: industries, employee count, HQ and the office list. Offices in several
+  countries are the strongest cross-border tell available here.
+- Company description and specialities: Motion B tells — embedded finance, payouts,
+  marketplace infrastructure, API integrations, "we built X in-house".
+A thin profile is NOT a negative signal about fit. It only lowers what we can personalize with,
+so it should reduce confidence and change the hook, not the fit_score.
 
 ## THE HOOK
 
 personalized_hook must be usable verbatim as a first line by an SDR. Anchor it to one concrete
-thing in the dossier — a specific post, a role change, a named market they just entered, a
-stated frustration — and connect it to ONE Sokin capability, not the whole product. Name the
+thing in the dossier — their tenure or recent move, a stated remit, the countries their company
+operates in, a named market or specialism — and connect it to ONE Sokin capability, not the
+whole product. Name the
 relevant proof point only when the sector actually matches (Manchester United for sports,
 Excel London for events and venues, Esenda for education, SAP for embedded infrastructure).
 If the dossier contains nothing concrete, return an empty string. A generic opener is worse

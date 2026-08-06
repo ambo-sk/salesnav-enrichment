@@ -4,8 +4,8 @@
  *   npm test
  *
  * No framework on purpose. Every assert guards a failure that is silent in
- * production: a lookup key that returns the wrong person, an activity window
- * that quietly includes the wrong months, a column that mislabels every row.
+ * production: a lookup key that returns the wrong person, a tenure computed off
+ * the wrong date, a column that mislabels every row.
  */
 
 import * as XLSX from 'xlsx';
@@ -16,19 +16,52 @@ import {
   toHarvestKey,
   companyKeyOf,
   currentPositions,
-  summarizeActivity,
   industryNames,
 } from '../src/enrichment/enrich';
 import { buildDossier } from '../src/enrichment/dossier';
+import { contactKey, indexContacts } from '../src/enrichment/contacts';
 import { buildWorkbook, workbookFilename } from '../src/enrichment/xlsx';
-import { collectScoredContacts, createRunState, runProgress } from '../src/enrichment/runner';
+import {
+  collectScoredContacts,
+  createRunState,
+  resetScoring,
+  runProgress,
+} from '../src/enrichment/runner';
 import type {
   EnrichedContact,
   HarvestProfile,
-  NormalizedComment,
-  NormalizedPost,
   ScoredContact,
 } from '../src/enrichment/harvest-types';
+
+/**
+ * The .xlsx is a hand-rolled zip, and SheetJS reads a malformed one happily —
+ * Excel does not, it "repairs" it. So assert the end-of-central-directory record
+ * itself: the directory must start where it says and end exactly at the EOCD.
+ */
+function assertValidZip(buffer: Uint8Array): void {
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let eocd = -1;
+  for (let i = buffer.length - 22; i >= 0; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  assert.notEqual(eocd, -1, 'no end-of-central-directory record');
+  assert.equal(eocd, buffer.length - 22, 'trailing bytes after the EOCD');
+
+  const entries = view.getUint16(eocd + 10, true);
+  const centralSize = view.getUint32(eocd + 12, true);
+  const centralStart = view.getUint32(eocd + 16, true);
+  assert.equal(
+    centralStart + centralSize,
+    eocd,
+    'central directory size/offset do not land on the EOCD — Excel will repair this file',
+  );
+  assert.equal(view.getUint32(centralStart, true), 0x02014b50, 'central directory magic');
+  assert.equal(view.getUint32(0, true), 0x04034b50, 'first local file header magic');
+  assert.ok(entries > 0, 'archive declares no entries');
+}
 
 let checks = 0;
 async function check(name: string, fn: () => void | Promise<void>): Promise<void> {
@@ -42,34 +75,7 @@ async function check(name: string, fn: () => void | Promise<void>): Promise<void
   }
 }
 
-const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.UTC(2026, 7, 1);
-
-function post(daysAgo: number, overrides: Partial<NormalizedPost> = {}): NormalizedPost {
-  const ms = NOW - daysAgo * DAY;
-  return {
-    url: `https://linkedin.com/posts/${daysAgo}`,
-    postedAtIso: new Date(ms).toISOString(),
-    postedAtMs: ms,
-    isRepost: false,
-    text: `post from ${daysAgo} days ago`,
-    likes: 10,
-    comments: 2,
-    shares: 1,
-    totalEngagement: 13,
-    ...overrides,
-  };
-}
-
-function comment(daysAgo: number): NormalizedComment {
-  const ms = NOW - daysAgo * DAY;
-  return {
-    url: `https://linkedin.com/comment/${daysAgo}`,
-    postedAtIso: new Date(ms).toISOString(),
-    postedAtMs: ms,
-    text: `comment from ${daysAgo} days ago`,
-  };
-}
 
 const PROFILE: HarvestProfile = {
   id: 'ACwAAAExample',
@@ -98,8 +104,6 @@ const PROFILE: HarvestProfile = {
 };
 
 function enriched(overrides: Partial<EnrichedContact> = {}): EnrichedContact {
-  const posts = [post(10), post(40)];
-  const comments = [comment(20)];
   return {
     input: {
       linkedin_url: 'https://www.linkedin.com/sales/lead/ACwAAAExample,NAME_SEARCH,abcd',
@@ -111,9 +115,6 @@ function enriched(overrides: Partial<EnrichedContact> = {}): EnrichedContact {
     lookupKey: 'profileId:ACwAAAExample',
     profile: PROFILE,
     companyKey: 'acme-payments',
-    posts,
-    comments,
-    activity: summarizeActivity(posts, comments, 3),
     errors: [],
     harvestCalls: 4,
     ...overrides,
@@ -176,29 +177,6 @@ async function main() {
     assert.deepEqual(industryNames(null), []);
   });
 
-  await check('summarizeActivity counts reposts, engagement and last activity', () => {
-    const posts = [post(5), post(30, { isRepost: true, totalEngagement: 7 }), post(100)];
-    const comments = [comment(2), comment(60)];
-    const stats = summarizeActivity(posts, comments, 9);
-
-    assert.equal(stats.postCount, 3);
-    assert.equal(stats.originalPostCount, 2);
-    assert.equal(stats.repostCount, 1);
-    assert.equal(stats.commentCount, 2);
-    assert.equal(stats.reactionCount, 9);
-    assert.equal(stats.totalEngagement, 13 + 7 + 13);
-    assert.equal(stats.isActive, true);
-    assert.equal(stats.lastActivityIso, new Date(NOW - 2 * DAY).toISOString());
-    assert.equal(stats.windowMonths, 6);
-  });
-
-  await check('summarizeActivity reports silence as inactive, not zero engagement', () => {
-    const stats = summarizeActivity([], [], 0);
-    assert.equal(stats.isActive, false);
-    assert.equal(stats.lastActivityIso, null);
-    assert.equal(stats.avgEngagementPerPost, 0);
-  });
-
   await check('pool preserves order and never exceeds the limit', async () => {
     let inFlight = 0;
     let peak = 0;
@@ -220,7 +198,7 @@ async function main() {
     assert.deepEqual(await pool([async () => 'a'], 10), ['a']);
   });
 
-  await check('dossier carries profile, company and activity through to the model', () => {
+  await check('dossier carries profile and company through to the model, with no activity', () => {
     const dossier = buildDossier(enriched(), {
       name: 'Acme Payments',
       industries: [{ name: 'Financial Services' } as any],
@@ -229,8 +207,8 @@ async function main() {
     assert.match(dossier, /Jane Doe/);
     assert.match(dossier, /VP Finance/);
     assert.match(dossier, /Industries: Financial Services/);
-    assert.match(dossier, /LINKEDIN ACTIVITY \(last 6 months\)/);
-    assert.match(dossier, /Posts: 2/);
+    // The scorer must never be handed activity it can then "personalize" on.
+    assert.ok(!/ACTIVITY|Recent posts|Recent comments/.test(dossier), 'dossier still carries activity');
     assert.ok(!dossier.includes('[object Object]'), 'dossier leaked an unrendered object');
 
     const broken = buildDossier(enriched({ profile: null, errors: ['profile: HTTP 404'] }), null);
@@ -260,15 +238,101 @@ async function main() {
     assert.equal(runProgress(state).total, 2);
   });
 
+  await check('a re-score rewinds phase C without touching the paid enrichment', () => {
+    const state = createRunState(
+      [
+        { linkedin_url: 'https://www.linkedin.com/sales/lead/A,N,x' },
+        { linkedin_url: 'https://www.linkedin.com/sales/lead/B,N,x' },
+      ],
+      { label: 'rescore', icp: '', now: NOW },
+    );
+    state.enriched = [enriched(), enriched()];
+    state.companies = { 'slug:acme': { name: 'Acme' } as any };
+    state.scores = [
+      { score: null, scoreError: 'unparseable score' },
+      { score: null, scoreError: 'unparseable score' },
+    ];
+    state.scoreCursor = 2;
+    state.phase = 'complete';
+    state.finishedAt = new Date(NOW).toISOString();
+    state.error = 'boom';
+    state.totals.harvestCalls = 124;
+
+    resetScoring(state, NOW);
+
+    assert.equal(state.phase, 'scoring');
+    assert.equal(state.scoreCursor, 0);
+    // Stale scores MUST be dropped, not appended to — phase C pushes, so a
+    // leftover array would double up and misalign every row against `enriched`.
+    assert.equal(state.scores.length, 0);
+    assert.equal(state.error, null);
+    assert.equal(state.finishedAt, null);
+    // The expensive half survives: no profile, post or company is re-fetched.
+    assert.equal(state.enriched.length, 2);
+    assert.equal(Object.keys(state.companies).length, 1);
+    assert.equal(state.totals.harvestCalls, 124);
+  });
+
+  // Similarweb's bulk endpoint returns rows REORDERED and drops the misses:
+  // three URLs in, two rows out, in a different order (observed live). Zipping
+  // the response against the request by index would attach the wrong person's
+  // email and phone number to a row — the one failure here nothing downstream
+  // could ever detect.
+  await check('contact rows are joined by URL, never by response order', () => {
+    const payload = {
+      data: [
+        {
+          linked_in_url: 'https://www.linkedin.com/in/bravo',
+          emails: ['b@example.com'],
+          direct_phones: ['+1 555 0002'],
+          mobile_phones: [],
+          accuracy_score: 90,
+          direct_phone_do_not_call: null,
+          mobile_phone_do_not_call: null,
+        },
+        {
+          linked_in_url: 'https://www.linkedin.com/in/alpha',
+          emails: ['a@example.com'],
+          direct_phones: [],
+          mobile_phones: ['+1 555 0001'],
+          accuracy_score: 93,
+          direct_phone_do_not_call: false,
+          mobile_phone_do_not_call: false,
+        },
+      ],
+    };
+
+    const found = indexContacts(payload);
+    const requested = [
+      'linkedin.com/in/alpha',
+      'https://uk.linkedin.com/in/BRAVO/',
+      'https://www.linkedin.com/in/charlie?trk=x',
+    ];
+    const joined = requested.map((url) => found.get(contactKey(url)) ?? null);
+
+    assert.equal(joined[0]?.emails[0], 'a@example.com', 'response order was trusted over the URL');
+    // Case, locale subdomain and trailing slash all vary between what we send
+    // and what comes back; all three must still land on the same row.
+    assert.equal(joined[1]?.emails[0], 'b@example.com');
+    assert.equal(joined[2], null, 'a dropped miss was filled with another contact');
+    assert.equal(joined[1]?.mobilePhones.length, 0);
+  });
+
   await check('workbook header and data rows stay aligned on every sheet', async () => {
     const items: ScoredContact[] = [
       {
         enriched: enriched(),
         company: {
           name: 'Acme Payments',
+          linkedinUrl: 'https://www.linkedin.com/company/acme-payments',
+          companyType: 'Privately Held',
           industries: [{ name: 'Financial Services' } as any],
           employeeCount: 900,
           website: 'https://acme.example',
+          locations: [
+            { city: 'London', country: 'GB', headquarter: true },
+            { city: 'Lisbon', country: 'PT' },
+          ],
         },
         score: {
           fit_score: 91,
@@ -277,27 +341,32 @@ async function main() {
           seniority: 'VP',
           buying_role: 'economic_buyer',
           rationale: 'Motion A — real cross-border volume.',
-          positive_signals: ['posts about FX'],
+          positive_signals: ['owns treasury'],
           risks: [],
-          activity_themes: ['treasury'],
-          personalized_hook: 'Saw your post.',
+          personalized_hook: 'Three years running treasury at Acme.',
           recommended_channel: 'LinkedIn',
           confidence: 'high',
         },
         scoreError: null,
+        contact: {
+          emails: ['jane.doe@acme.example'],
+          directPhones: ['+44 20 7946 0000'],
+          mobilePhones: ['+44 7700 900000'],
+          accuracyScore: 93,
+          directPhoneDoNotCall: false,
+          mobilePhoneDoNotCall: true,
+        },
       },
       {
         enriched: enriched({
           profile: null,
           companyKey: null,
-          posts: [],
-          comments: [],
-          activity: summarizeActivity([], [], 0),
           errors: ['profile: HTTP 404'],
         }),
         company: null,
         score: null,
         scoreError: 'HTTP 402: out of credits',
+        contact: null,
       },
     ];
 
@@ -318,23 +387,42 @@ async function main() {
     // Read back with a real parser: the writer is hand-rolled OOXML, so
     // "a spreadsheet app can open this" is the assertion that matters.
     const book = XLSX.read(buffer, { type: 'array' });
-    assert.deepEqual(book.SheetNames, ['Scored Contacts', 'Activity', 'Run Info']);
+    assert.deepEqual(book.SheetNames, ['Scored Contacts', 'Run Info']);
 
-    for (const sheetName of ['Scored Contacts', 'Activity']) {
-      const rows = XLSX.utils.sheet_to_json<string[]>(book.Sheets[sheetName], {
-        header: 1,
-        blankrows: false,
-        defval: '',
-      });
-      const [header, ...body] = rows;
-      assert.ok(body.length > 0, `${sheetName} has no data rows`);
-      for (const [index, row] of body.entries()) {
-        assert.equal(
-          row.length,
-          header.length,
-          `${sheetName} row ${index} has ${row.length} cells, header has ${header.length}`,
-        );
-      }
+    const rows = XLSX.utils.sheet_to_json<string[]>(book.Sheets['Scored Contacts'], {
+      header: 1,
+      blankrows: false,
+      defval: '',
+    });
+    const [header, ...body] = rows;
+    assert.deepEqual(header, [
+      'Personal Linkedin URL',
+      'First Name',
+      'Last Name',
+      'Job Title',
+      'Company Name',
+      'Website',
+      'Company Type',
+      'Company HQ',
+      'Company offices',
+      'Company Linkedin URL',
+      'Email',
+      'Direct Phone',
+      'Mobile Phone',
+      'Contact Accuracy',
+      'Personalized Hook',
+      'Top Skills',
+      'Tenure (months)',
+      'Rationale',
+      'Current Experiences',
+    ]);
+    assert.ok(body.length > 0, 'Scored Contacts has no data rows');
+    for (const [index, row] of body.entries()) {
+      assert.equal(
+        row.length,
+        header.length,
+        `Scored Contacts row ${index} has ${row.length} cells, header has ${header.length}`,
+      );
     }
 
     const contactRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(
@@ -342,20 +430,29 @@ async function main() {
       { defval: '' },
     );
     assert.equal(contactRows.length, 2);
-    assert.equal(contactRows[0]['Fit Score'], 91);
-    assert.equal(contactRows[0]['Name'], 'Jane Doe');
-    assert.equal(contactRows[0]['Company Industry'], 'Financial Services');
-    assert.equal(contactRows[0]['Posts (6mo)'], 2);
-    assert.equal(contactRows[1]['Fit Score'], '');
-    assert.equal(contactRows[1]['Verdict'], 'scoring_failed');
-    assert.match(String(contactRows[1]['Data Gaps']), /HTTP 404/);
+    assert.equal(contactRows[0]['First Name'], 'Jane');
+    assert.equal(contactRows[0]['Last Name'], 'Doe');
+    assert.equal(contactRows[0]['Job Title'], 'VP Finance');
+    assert.equal(contactRows[0]['Personal Linkedin URL'], 'https://www.linkedin.com/in/jane-doe');
+    assert.equal(contactRows[0]['Company HQ'], 'London, GB');
+    assert.equal(contactRows[0]['Company offices'], 'London, GB | Lisbon, PT');
+    assert.equal(contactRows[0]['Top Skills'], 'Treasury');
+    // March 2023 -> August 2026 is 41 months.
+    assert.equal(contactRows[0]['Tenure (months)'], 41);
+    assert.equal(contactRows[0]['Current Experiences'], 'Acme Payments — VP Finance (2023)');
+    assert.equal(contactRows[0]['Rationale'], 'Motion A — real cross-border volume.');
+    assert.equal(contactRows[0]['Email'], 'jane.doe@acme.example');
+    assert.equal(contactRows[0]['Direct Phone'], '+44 20 7946 0000');
+    // A do-not-call number must never export as a bare, dialable-looking cell.
+    assert.equal(contactRows[0]['Mobile Phone'], '+44 7700 900000 (DNC)');
+    assert.equal(contactRows[0]['Contact Accuracy'], 93);
+    assert.equal(contactRows[1]['Email'], '');
+    // The profile failed here: the row still carries the scraped name and URL.
+    assert.equal(contactRows[1]['First Name'], 'Jane');
+    assert.equal(contactRows[1]['Personalized Hook'], '');
+    assert.match(String(contactRows[1]['Personal Linkedin URL']), /sales\/lead/);
     assert.ok(!JSON.stringify(contactRows).includes('[object Object]'));
-
-    const activityRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(book.Sheets['Activity'], {
-      defval: '',
-    });
-    assert.equal(activityRows.length, 3);
-    assert.ok(activityRows.every((row) => row['Name'] === 'Jane Doe'));
+    assertValidZip(buffer);
   });
 
   await check('workbook stays correct at a full 1000-contact run', async () => {
@@ -378,12 +475,12 @@ async function main() {
         rationale: '',
         positive_signals: [],
         risks: [],
-        activity_themes: [],
         personalized_hook: '',
         recommended_channel: '',
         confidence: 'medium',
       },
       scoreError: null,
+      contact: null,
     }));
 
     const buffer = await buildWorkbook(
@@ -406,11 +503,9 @@ async function main() {
       { defval: '' },
     );
     assert.equal(contacts.length, N);
-    assert.equal(contacts[0]['Fit Score'], 100, 'rows are not sorted best-fit first');
-    assert.equal(
-      XLSX.utils.sheet_to_json(book.Sheets['Activity'], { defval: '' }).length,
-      N * 3,
-    );
+    // Fit score is no longer a column, so best-fit-first is asserted through
+    // the row it belongs to: contact 100 scores 100 and must lead.
+    assert.equal(contacts[0]['Company Name'], 'Company 100', 'rows are not sorted best-fit first');
     assert.ok(buffer.byteLength < 12 * 1024 * 1024, `workbook is ${buffer.byteLength} bytes`);
   });
 

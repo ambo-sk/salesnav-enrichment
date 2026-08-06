@@ -36,7 +36,6 @@ const SCORE_SCHEMA = {
     'rationale',
     'positive_signals',
     'risks',
-    'activity_themes',
     'personalized_hook',
     'recommended_channel',
     'confidence',
@@ -57,7 +56,6 @@ const SCORE_SCHEMA = {
     rationale: { type: 'string' },
     positive_signals: { type: 'array', items: { type: 'string' } },
     risks: { type: 'array', items: { type: 'string' } },
-    activity_themes: { type: 'array', items: { type: 'string' } },
     personalized_hook: { type: 'string' },
     recommended_channel: { type: 'string' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -76,8 +74,7 @@ Scoring rules:
 - verdict: strong_fit (>=80), fit (60-79), weak_fit (40-59), not_fit (<40).
 - Judge the PERSON and their COMPANY against the ICP. A senior person at a wrong-fit company is not a fit, and neither is a junior person at a perfect-fit company.
 - buying_role: one of economic_buyer, champion, influencer, end_user, gatekeeper, unknown.
-- activity_themes: what this person actually posts and comments about, in 2-5 short noun phrases. Empty array if there is no activity.
-- personalized_hook: one or two sentences an SDR could open with, grounded in something CONCRETE from this dossier (a specific post, a role change, company news). If nothing concrete exists, return an empty string rather than inventing something.
+- personalized_hook: one or two sentences an SDR could open with, grounded in something CONCRETE from this dossier — the person's own role, tenure, career move, stated focus, or a specific fact about their company. The dossier contains NO posts or comments, so never reference their LinkedIn activity. If nothing concrete exists, return an empty string rather than inventing something.
 - risks: reasons this contact may not convert or may be mis-targeted.
 - confidence: low when the dossier is sparse or the profile lookup failed.
 
@@ -125,7 +122,11 @@ export async function scoreDossier(
             },
           ],
       temperature: 0.2,
-      max_tokens: 1200,
+      // 1200 truncated a full score mid-JSON on any rich dossier — the cut-off
+      // text then failed to parse, so BOTH attempts burned and the contact
+      // scored null. A complete score is ~700-900 tokens; reasoning models
+      // spend more before emitting any of it.
+      max_tokens: 4000,
       ...(structured
         ? {
             response_format: {
@@ -259,7 +260,6 @@ function normalizeScore(value: unknown): Score | null {
     rationale: str(raw.rationale),
     positive_signals: strArray(raw.positive_signals),
     risks: strArray(raw.risks),
-    activity_themes: strArray(raw.activity_themes),
     personalized_hook: str(raw.personalized_hook),
     recommended_channel: str(raw.recommended_channel),
     confidence,

@@ -15,4 +15,5 @@ dist/
 .idea/
 .memprobe.mjs
 .smoke.mjs
+.rescore.mjs
 .tokens/

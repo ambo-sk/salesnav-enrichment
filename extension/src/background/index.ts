@@ -34,6 +34,7 @@ import {
 import {
   advanceRun,
   createRunState,
+  resetScoring,
   runProgress,
   type RunConfig,
   type RunState,
@@ -239,7 +240,11 @@ function workerConfigFrom(settings: Settings): WorkerConfig {
 export function summarize(state: RunState | null): RunSummary | null {
   if (!state) return null;
   const progress = runProgress(state);
-  const active = state.phase === 'enriching' || state.phase === 'companies' || state.phase === 'scoring';
+  const active =
+    state.phase === 'enriching' ||
+    state.phase === 'companies' ||
+    state.phase === 'contacts' ||
+    state.phase === 'scoring';
   return {
     active,
     phase: state.phase,
@@ -1107,6 +1112,26 @@ async function handleStopEnrichment() {
   return { success: true };
 }
 
+/** Score a finished run again, reusing the enrichment already paid for. */
+async function handleRescoreRun() {
+  const state = await getRunState();
+  if (!state) return { success: false, error: 'No run to re-score.' };
+  if (summarize(state)?.active) return { success: false, error: 'This run is still going.' };
+  if (state.enriched.length === 0) return { success: false, error: 'Nothing enriched to score.' };
+
+  resetScoring(state, Date.now());
+  await saveRunState(state);
+  await chrome.alarms.create(ENRICH_TICK_ALARM, {
+    delayInMinutes: ENRICH_TICK_MINUTES,
+    periodInMinutes: ENRICH_TICK_MINUTES,
+  });
+  await broadcastRunState(state);
+
+  console.log(`[BACKGROUND] Re-scoring ${state.enriched.length} contacts`);
+  driveRun().catch((err) => console.error('[BACKGROUND] driveRun failed:', err));
+  return { success: true };
+}
+
 /** Clear a finished run so the next scrape starts clean. */
 async function handleDiscardRun() {
   await clearRunState();
@@ -1193,6 +1218,10 @@ onMessage((message: Message, sender, sendResponse) => {
         sendResponse,
         'STOP_ENRICHMENT',
       );
+      return true;
+
+    case 'RESCORE_RUN':
+      dispatchAsync(ensureInitialized().then(() => handleRescoreRun()), sendResponse, 'RESCORE_RUN');
       return true;
 
     case 'DISCARD_RUN':

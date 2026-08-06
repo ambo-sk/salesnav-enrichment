@@ -9,7 +9,7 @@ Chrome extension                         Cloudflare (free plan)
 scrape lead pages
   │
   ├─ per contact ──────────────────────▶ POST /proxy/harvest ──▶ HarvestAPI
-  │    profile + 6mo posts/comments        (key attached here)
+  │    profile only, no activity           (key attached here)
   ├─ company, deduped ─────────────────▶ POST /proxy/harvest
   ├─ per contact ──────────────────────▶ POST /proxy/score   ──▶ OpenRouter
   │    dossier in, score out               (prompt + ICP + model fixed here)
@@ -80,9 +80,17 @@ npm run db:init
 # secrets — these never reach the browser
 npx wrangler secret put HARVEST_API_KEY
 npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler secret put SIMILARWEB_API_KEY   # optional — emails and phones
 
 npm run deploy
 ```
+
+`SIMILARWEB_API_KEY` switches on the contacts phase: profile URLs are sent to Similarweb's
+bulk contact-enrichment endpoint, 25 at a time, and the workbook gains Email, Direct Phone,
+Mobile Phone and Contact Accuracy columns. Without the secret the phase is skipped and every
+other phase behaves exactly as before. Similarweb bills per returned field — mobile phone 20
+data credits, email 4, direct phone 1 — so a 1000-contact run with hits on all three costs
+~25k credits.
 
 Set `HARVEST_CONCURRENCY` in `wrangler.jsonc` to your HarvestAPI plan's concurrency
 (free 1 / starter 5 / basic 10 / pro 20 / business 40). It also bounds the run's chunk size.
@@ -123,8 +131,8 @@ Hit **Test connection** before your first run.
 The Sokin ICP lives in `worker/src/icp.ts` — prose, versioned, reviewed in diffs. It defines the
 two buying motions (treasury/payments, and embedded infrastructure — the SAP shape), the sectors
 with existing proof points, the disqualifier list (competitors, banks, consultants, job seekers,
-high-risk verticals), how to weigh company fit against seniority, and which activity signals in
-the 6-month window count as buying triggers. Edit it and redeploy.
+high-risk verticals), how to weigh company fit against seniority, and which profile and company
+signals count as buying triggers. Edit it and redeploy.
 
 Precedence: the extension's **Target profile** field → the `DEFAULT_ICP` var → `src/icp.ts`.
 Fill the extension field only to narrow one run (a single vertical or region) — it *replaces*
@@ -143,43 +151,44 @@ Each scored row's rationale starts `Motion A —` or `Motion B —`, so the shee
 
 ## What the worker does per contact
 
-All HarvestAPI traffic goes through `/proxy/harvest`, which allowlists exactly these five paths —
+All HarvestAPI traffic goes through `/proxy/harvest`, which allowlists exactly these two paths —
 a token holder cannot reach endpoints that send connection requests or messages as the account.
 
 | Step | HarvestAPI endpoint | Notes |
 |---|---|---|
 | Profile | `GET /linkedin/profile` | Sales Nav URLs resolve via `profileId` |
-| Posts | `GET /linkedin/profile-posts` | `scrapePostedLimit=6months`, server-side window |
-| Comments | `GET /linkedin/profile-comments` | 6-month window applied client-side on the timestamp |
-| Reactions | `GET /linkedin/profile-reactions` | optional; no timestamps, so "recent" not "6 months" |
 | Company | `GET /linkedin/company` | **deduped** across the batch by `universalName` |
 
+LinkedIn activity (posts, comments, reactions) is deliberately **not** pulled: the personal and
+company profiles are what the export needs, and each activity endpoint was a paginated call per
+contact.
+
 Then one OpenRouter call scores the whole dossier against your ICP and returns fit score, tier,
-buying role, signals, risks, activity themes, and a personalized opening line.
+buying role, signals, risks, and a personalized opening line.
 
 ### Cost per 1000 contacts
 
-Measured on live calls (`npm run smoke`), not estimated:
+- **HarvestAPI** — 1 call per contact (profile), plus one per *distinct* company. ~1,300 calls
+  for a 1000-contact list at ~300 unique employers. It was ~4,300 while activity was pulled.
+- **OpenRouter** — 1 call per contact. The dossier is now profile + company only, so the input
+  is a fraction of the ~7.7k tokens the activity-carrying dossier measured; re-measure with
+  `npm run smoke` before quoting a figure. On `google/gemini-2.5-flash` ($0.30/M in, $2.50/M out)
+  the old, larger dossier cost ≈ $4 per 1000 contacts — this is an upper bound now.
+- **Cloudflare** — the free plan covers this worker; D1 is pennies here.
 
-- **HarvestAPI** — ~4 calls per contact (profile + post pages + comments + reactions), plus one
-  per *distinct* company. ~4,300 calls for a 1000-contact list at ~300 unique employers.
-- **OpenRouter** — 1 call per contact, ~7.7k tokens in / ~600 out. On
-  `anthropic/claude-sonnet-5` ($2/M in, $10/M out) that is **≈ $21 per 1000 contacts**.
-- **Cloudflare** — Workers Paid ($5/mo) covers the Workflow; R2 and D1 are pennies here.
-
-The dossier (15 posts + 10 comments per contact) is what drives the input tokens. To spend less:
-lower `MAX_POST_PAGES` / `MAX_COMMENT_PAGES`, set `INCLUDE_REACTIONS=false` (reactions carry no
-timestamps and cannot be scoped to 6 months anyway), or trim `LIMITS` in `src/openrouter.ts`.
+To spend less still, trim `LIMITS` in `extension/src/enrichment/dossier.ts` (about, description,
+experience, skills).
 
 ## The workbook
 
 | Sheet | Contents |
 |---|---|
-| **Scored Contacts** | One row per person, best fit first: score, tier, verdict, buying role, rationale, signals, risks, hook, plus the full profile, company record and activity summary. 55 columns. |
-| **Activity** | One row per post and comment inside the 6-month window, with engagement and text. |
+| **Scored Contacts** | One row per person, best fit first. 15 columns: Personal Linkedin URL, First Name, Last Name, Job Title, Company Name, Website, Company Type, Company HQ, Company offices, Company Linkedin URL, Personalized Hook, Top Skills, Tenure (months), Rationale, Current Experiences (`Company — Title (start year)`, pipe-separated). |
 | **Run Info** | Job metadata, the ICP used, data-quality counts, tier distribution. |
 
-A row that failed to enrich is never silently blank — the `Data Gaps` column names what failed.
+Rows are still sorted by fit score even though the score itself is no longer a column. A contact
+whose profile lookup failed keeps the scraped name and Sales Navigator URL rather than going
+blank; **Run Info** carries the per-run count of what failed.
 
 ## Who used what
 
@@ -199,9 +208,10 @@ npx wrangler d1 execute salesnav-enrichment-eu --remote --command \
 ## Checks
 
 ```bash
-cd extension && npm test   # 13 assertions: URL mapping, company slug fallback, industry
-                           # flattening, activity window, pool concurrency, partial-run export,
-                           # workbook round-trip through a real xlsx parser, 1000-row scale
+cd extension && npm test   # 12 assertions: URL mapping, company slug fallback, industry
+                           # flattening, pool concurrency, partial-run export, a dossier that
+                           # carries no activity, workbook round-trip through a real xlsx
+                           # parser, 1000-row scale
 cd worker && npm test      # 4 assertions: score parsing and the ICP
 
 # live, against the deployed worker — costs real credits

@@ -27,8 +27,9 @@ check('parseScore accepts raw, fenced and prose-wrapped JSON', () => {
   const body = JSON.stringify({
     fit_score: 84, tier: 'A', verdict: 'strong_fit', seniority: 'VP',
     buying_role: 'economic_buyer', rationale: 'Owns the payments budget.',
-    positive_signals: ['posts about FX costs'], risks: [], activity_themes: ['treasury'],
-    personalized_hook: 'Saw your post on FX spread.', recommended_channel: 'LinkedIn',
+    positive_signals: ['owns treasury'], risks: [],
+    personalized_hook: 'Three years running treasury at a cross-border payments firm.',
+    recommended_channel: 'LinkedIn',
     confidence: 'high',
   });
   for (const variant of [body, '```json\n' + body + '\n```', 'Here you go:\n' + body + '\nHope that helps.']) {

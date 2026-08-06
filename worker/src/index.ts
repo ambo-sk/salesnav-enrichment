@@ -5,6 +5,7 @@
  *   GET  /config              ICP, model and pipeline knobs for the extension
  *   POST /proxy/harvest       {path, params} -> HarvestAPI, key attached here
  *   POST /proxy/score         {dossier} -> Score, prompt + ICP + model applied here
+ *   POST /proxy/contacts      {contacts} -> Similarweb emails + phones, key attached here
  *   POST /runs                start a run, returns its id
  *   POST /runs/:id/finish     record totals
  *   GET  /runs                this user's recent runs
@@ -27,19 +28,33 @@ import { SOKIN_ICP, icpText } from './icp';
 import type { AuthedUser, ClientConfig, Env } from './types';
 
 const HARVEST_BASE = 'https://api.harvestapi.io';
+const SIMILARWEB_CONTACTS_URL = 'https://api.similarweb.com/v5/contact-enrichment/contacts/bulk';
+
+/**
+ * Similarweb bills per returned field: mobile phone 20 data credits, email 4,
+ * direct phone 1. The list is fixed HERE, not sent by the extension — a token
+ * holder must not be able to turn a run into a 20-credit-per-row mobile sweep.
+ */
+const SIMILARWEB_OUTPUT_FIELDS = [
+  'contact_id',
+  'linkedin_url',
+  'emails',
+  'direct_phones',
+  'mobile_phones',
+  'accuracy_score',
+  'direct_phone_do_not_call',
+  'mobile_phone_do_not_call',
+];
+
+/** Similarweb's own per-request ceiling on the bulk endpoint. */
+const MAX_CONTACTS_PER_LOOKUP = 25;
 
 /**
  * Only these upstream paths are reachable through the proxy. Without an
  * allowlist a token holder could point the worker at any HarvestAPI endpoint,
  * including ones that send connection requests or messages as the account.
  */
-const ALLOWED_HARVEST_PATHS = new Set([
-  '/linkedin/profile',
-  '/linkedin/company',
-  '/linkedin/profile-posts',
-  '/linkedin/profile-comments',
-  '/linkedin/profile-reactions',
-]);
+const ALLOWED_HARVEST_PATHS = new Set(['/linkedin/profile', '/linkedin/company']);
 
 /** Per-request guard rails on proxied query parameters. */
 const MAX_PARAM_LENGTH = 500;
@@ -94,13 +109,10 @@ function configFor(env: Env): ClientConfig {
     icp: env.DEFAULT_ICP?.trim() || SOKIN_ICP,
     model: env.OPENROUTER_MODEL,
     harvestConcurrency: Math.max(1, Math.min(intVar(env.HARVEST_CONCURRENCY, 5), 40)),
-    maxPostPages: intVar(env.MAX_POST_PAGES, 3),
-    maxCommentPages: intVar(env.MAX_COMMENT_PAGES, 2),
-    maxReactionPages: intVar(env.MAX_REACTION_PAGES, 1),
-    includeReactions: boolVar(env.INCLUDE_REACTIONS, true),
     findEmail: boolVar(env.FIND_EMAIL, false),
     companyNameFallback: boolVar(env.COMPANY_NAME_FALLBACK, true),
     maxContactsPerRun: intVar(env.MAX_CONTACTS_PER_JOB, 1000),
+    findContacts: Boolean(env.SIMILARWEB_API_KEY),
   };
 }
 
@@ -159,6 +171,80 @@ async function handleHarvestProxy(
   // Pass the body through verbatim — HarvestAPI signals a missing profile with
   // a 200 envelope carrying {element: null, error: "..."}, and the client
   // distinguishes those cases itself.
+  const text = await upstream.text();
+  return new Response(text, {
+    status: upstream.status,
+    headers: { 'Content-Type': 'application/json', ...cors },
+  });
+}
+
+/**
+ * Similarweb contact enrichment: LinkedIn profile URLs in, emails and phones out.
+ *
+ * Only `linkedin_url` matching is accepted. Similarweb also matches on name +
+ * company, but the bulk response identifies rows ONLY by the contact it found —
+ * it comes back reordered and with misses dropped — so a name-matched row could
+ * not be joined back to the right person without guessing. A URL round-trips.
+ */
+async function handleContactsProxy(
+  request: Request,
+  env: Env,
+  user: AuthedUser,
+  cors: Record<string, string>,
+): Promise<Response> {
+  if (!env.SIMILARWEB_API_KEY) {
+    return json({ error: 'contact enrichment is not configured on this worker' }, 501, cors);
+  }
+
+  let body: { contacts?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return json({ error: 'invalid JSON body' }, 400, cors);
+  }
+
+  const raw = Array.isArray(body.contacts) ? body.contacts : [];
+  if (raw.length > MAX_CONTACTS_PER_LOOKUP) {
+    return json({ error: `at most ${MAX_CONTACTS_PER_LOOKUP} contacts per request` }, 400, cors);
+  }
+
+  const contacts = raw
+    .map((entry) => (entry as { linkedin_url?: unknown })?.linkedin_url)
+    .filter((url): url is string => typeof url === 'string' && url.length <= MAX_PARAM_LENGTH)
+    .map((url) => ({ linkedin_url: url }));
+
+  if (contacts.length === 0) {
+    return json({ error: '`contacts` must hold at least one {linkedin_url}' }, 400, cors);
+  }
+
+  // Metered on the harvest counter: it is the per-user call ceiling, and this
+  // endpoint spends real money the same way the profile lookups do.
+  const allowed = await checkAndRecordUsage(env, user.id, 'harvest', {
+    limit: intVar(env.DAILY_HARVEST_CALL_LIMIT, 20000),
+  });
+  if (!allowed) {
+    return json({ error: 'daily call limit reached for this token' }, 429, cors);
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(SIMILARWEB_CONTACTS_URL, {
+      method: 'POST',
+      headers: {
+        'api-key': env.SIMILARWEB_API_KEY,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ contacts, output_fields: SIMILARWEB_OUTPUT_FIELDS }),
+    });
+  } catch (err) {
+    return json(
+      { error: `upstream unreachable: ${err instanceof Error ? err.message : String(err)}` },
+      502,
+      cors,
+    );
+  }
+
   const text = await upstream.text();
   return new Response(text, {
     status: upstream.status,
@@ -230,6 +316,10 @@ export default {
 
       if (path === '/proxy/harvest' && request.method === 'POST') {
         return await handleHarvestProxy(request, env, user, cors);
+      }
+
+      if (path === '/proxy/contacts' && request.method === 'POST') {
+        return await handleContactsProxy(request, env, user, cors);
       }
 
       if (path === '/proxy/score' && request.method === 'POST') {

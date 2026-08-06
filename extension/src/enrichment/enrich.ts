@@ -1,6 +1,9 @@
 /**
- * Turn one scraped row into an EnrichedContact: profile + 6 months of activity,
- * normalized and summarized.
+ * Turn one scraped row into an EnrichedContact: the LinkedIn profile only.
+ *
+ * Posts, comments and reactions are deliberately NOT fetched — the export is
+ * built from the personal and company profiles alone, and each activity
+ * endpoint was a paginated HarvestAPI call per contact.
  *
  * A failure on any single HarvestAPI call is recorded on the contact and the
  * rest of the enrichment continues — one dead profile must never sink a chunk,
@@ -9,55 +12,19 @@
 
 import { HarvestClient } from './harvest';
 import type {
-  ActivityStats,
   EnrichedContact,
-  HarvestComment,
   HarvestCompany,
   HarvestExperience,
-  HarvestPost,
   HarvestProfile,
   InboundContact,
-  NormalizedComment,
-  NormalizedPost,
 } from './harvest-types';
-
-export const ACTIVITY_WINDOW_MONTHS = 6;
-const ACTIVITY_WINDOW_MS = ACTIVITY_WINDOW_MONTHS * 30.44 * 24 * 60 * 60 * 1000;
-
-/**
- * Retention caps applied AFTER the activity stats are computed, so the counts
- * in the workbook still reflect everything HarvestAPI returned while the
- * retained payload stays bounded.
- *
- * Two ceilings force this: a Workflow step may return at most 1 MB, and a
- * 1000-contact run holds every enriched record in Worker memory (128 MB) until
- * the workbook is written.
- *
- * The caps are set at what the scorer actually reads (openrouter.ts LIMITS uses
- * 15 posts x 600 chars, 10 comments x 300) plus a small margin for the Activity
- * sheet. Retaining more than the consumer reads buys nothing and costs memory
- * on every one of 1000 contacts.
- */
-const RETAIN = {
-  posts: 15,
-  comments: 10,
-  postTextChars: 800,
-  commentTextChars: 400,
-};
 
 export interface EnrichOptions {
   /** Base URL of the enrichment worker (no trailing slash). */
   workerUrl: string;
   /** The user's bearer token — the HarvestAPI key stays on the worker. */
   apiToken: string;
-  maxPostPages: number;
-  maxCommentPages: number;
-  maxReactionPages: number;
-  includeReactions: boolean;
   findEmail: boolean;
-  /** Epoch ms the 6-month window is measured back from. Passed in (never
-   *  Date.now() inside a step) so a workflow retry re-derives the same window. */
-  now: number;
 }
 
 /**
@@ -103,103 +70,8 @@ export function companyKeyOf(profile: HarvestProfile | null): string | null {
   return null;
 }
 
-/** HarvestAPI `postedAt` is either `{timestamp,date}` or a bare date string. */
-function postedAtMs(postedAt: HarvestPost['postedAt']): number | null {
-  if (!postedAt) return null;
-  if (typeof postedAt === 'string') {
-    const parsed = Date.parse(postedAt);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (typeof postedAt.timestamp === 'number' && postedAt.timestamp > 0) {
-    // Some feeds report seconds rather than milliseconds.
-    return postedAt.timestamp < 1e12 ? postedAt.timestamp * 1000 : postedAt.timestamp;
-  }
-  if (postedAt.date) {
-    const parsed = Date.parse(postedAt.date);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function normalizePost(post: HarvestPost): NormalizedPost {
-  const ms = postedAtMs(post.postedAt);
-  const engagement = post.engagement ?? {};
-  const likes = engagement.likes ?? engagement.reactions ?? 0;
-  const comments = engagement.comments ?? 0;
-  const shares = engagement.shares ?? 0;
-
-  return {
-    url: post.linkedinUrl ?? '',
-    postedAtIso: ms ? new Date(ms).toISOString() : null,
-    postedAtMs: ms,
-    isRepost: Boolean(post.repost || post.repostId),
-    text: (post.content ?? '').trim(),
-    likes,
-    comments,
-    shares,
-    totalEngagement: likes + comments + shares,
-  };
-}
-
-function normalizeComment(comment: HarvestComment): NormalizedComment {
-  const ms =
-    typeof comment.createdAtTimestamp === 'number' && comment.createdAtTimestamp > 0
-      ? comment.createdAtTimestamp < 1e12
-        ? comment.createdAtTimestamp * 1000
-        : comment.createdAtTimestamp
-      : comment.createdAt
-        ? Date.parse(comment.createdAt) || null
-        : null;
-
-  return {
-    url: comment.linkedinUrl ?? '',
-    postedAtIso: ms ? new Date(ms).toISOString() : null,
-    postedAtMs: ms,
-    text: (comment.commentary ?? '').trim(),
-  };
-}
-
 /**
- * Keep items dated inside the window. Undated items are KEPT: HarvestAPI
- * already applied its own `scrapePostedLimit=6months` server-side for posts,
- * so dropping the ones it failed to timestamp would discard real activity.
- */
-function withinWindow<T extends { postedAtMs: number | null }>(items: T[], now: number): T[] {
-  const cutoff = now - ACTIVITY_WINDOW_MS;
-  return items.filter((item) => item.postedAtMs === null || item.postedAtMs >= cutoff);
-}
-
-export function summarizeActivity(
-  posts: NormalizedPost[],
-  comments: NormalizedComment[],
-  reactionCount: number,
-): ActivityStats {
-  const originalPostCount = posts.filter((p) => !p.isRepost).length;
-  const totalEngagement = posts.reduce((sum, p) => sum + p.totalEngagement, 0);
-
-  const timestamps = [...posts, ...comments]
-    .map((item) => item.postedAtMs)
-    .filter((ms): ms is number => ms !== null);
-  const lastActivityMs = timestamps.length > 0 ? Math.max(...timestamps) : null;
-
-  return {
-    windowMonths: ACTIVITY_WINDOW_MONTHS,
-    postCount: posts.length,
-    originalPostCount,
-    repostCount: posts.length - originalPostCount,
-    commentCount: comments.length,
-    reactionCount,
-    totalEngagement,
-    avgEngagementPerPost:
-      posts.length > 0 ? Math.round((totalEngagement / posts.length) * 10) / 10 : 0,
-    lastActivityIso: lastActivityMs ? new Date(lastActivityMs).toISOString() : null,
-    postsPerMonth: Math.round((posts.length / ACTIVITY_WINDOW_MONTHS) * 10) / 10,
-    isActive: posts.length > 0 || comments.length > 0,
-  };
-}
-
-/**
- * Fetch and normalize everything for one contact.
+ * Fetch and normalize the profile for one contact.
  *
  * Gets its OWN HarvestClient so `harvestCalls` is an exact per-contact count —
  * a client shared across the concurrency pool would interleave its counter
@@ -225,59 +97,11 @@ export async function enrichContact(
     errors.push(`profile: ${message(err)}`);
   }
 
-  // Activity lookups reuse the profile id when Harvest resolved one — it is the
-  // faster key, and it still works when the input was a plain /in/ URL.
-  const activityKey: { type: 'profileId' | 'url'; value: string } = profile?.id
-    ? { type: 'profileId', value: profile.id }
-    : key;
-
-  const [rawPosts, rawComments, rawReactions] = await Promise.all([
-    client
-      .getProfilePosts(activityKey, { maxPages: options.maxPostPages })
-      .catch((err) => {
-        errors.push(`posts: ${message(err)}`);
-        return [] as HarvestPost[];
-      }),
-    client
-      .getProfileComments(activityKey, { maxPages: options.maxCommentPages })
-      .catch((err) => {
-        errors.push(`comments: ${message(err)}`);
-        return [] as HarvestComment[];
-      }),
-    options.includeReactions
-      ? client
-          .getProfileReactions(activityKey, { maxPages: options.maxReactionPages })
-          .catch((err) => {
-            errors.push(`reactions: ${message(err)}`);
-            return [];
-          })
-      : Promise.resolve([]),
-  ]);
-
-  const posts = withinWindow(rawPosts.map(normalizePost), options.now).sort(
-    (a, b) => (b.postedAtMs ?? 0) - (a.postedAtMs ?? 0),
-  );
-  const comments = withinWindow(rawComments.map(normalizeComment), options.now).sort(
-    (a, b) => (b.postedAtMs ?? 0) - (a.postedAtMs ?? 0),
-  );
-
-  // Stats first (over everything), retention second (bounded payload).
-  const activity = summarizeActivity(posts, comments, rawReactions.length);
-
   return {
     input: contact,
     lookupKey: `${key.type}:${key.value}`,
     profile: profile ? trimProfile(profile) : null,
     companyKey: companyKeyOf(profile),
-    posts: posts.slice(0, RETAIN.posts).map((post) => ({
-      ...post,
-      text: clip(post.text, RETAIN.postTextChars),
-    })),
-    comments: comments.slice(0, RETAIN.comments).map((comment) => ({
-      ...comment,
-      text: clip(comment.text, RETAIN.commentTextChars),
-    })),
-    activity,
     errors,
     harvestCalls: client.calls,
   };

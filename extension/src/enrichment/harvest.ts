@@ -13,14 +13,7 @@
  * matches on the message text as well as the status code.
  */
 
-import type {
-  HarvestComment,
-  HarvestCompany,
-  HarvestEnvelope,
-  HarvestPost,
-  HarvestProfile,
-  HarvestReaction,
-} from './harvest-types';
+import type { HarvestCompany, HarvestEnvelope, HarvestProfile } from './harvest-types';
 
 export class HarvestError extends Error {
   constructor(
@@ -170,84 +163,6 @@ export class HarvestClient {
     return result.element ?? null;
   }
 
-  /**
-   * Posts authored by a person. `scrapePostedLimit` is HarvestAPI's own
-   * server-side window and supports '6months' directly, so the 6-month scope
-   * costs nothing extra to enforce.
-   */
-  async getProfilePosts(
-    key: { type: 'profileId' | 'url'; value: string },
-    opts: { maxPages: number; postedLimit?: string },
-  ): Promise<HarvestPost[]> {
-    return this.paginate<HarvestPost>(
-      '/linkedin/profile-posts',
-      {
-        [key.type === 'profileId' ? 'profileId' : 'profile']: key.value,
-        scrapePostedLimit: opts.postedLimit ?? '6months',
-      },
-      opts.maxPages,
-    );
-  }
-
-  /**
-   * Comments authored by a person. `postedLimit` only accepts 24h/week/month
-   * here, so the 6-month window is applied client-side on createdAtTimestamp.
-   */
-  async getProfileComments(
-    key: { type: 'profileId' | 'url'; value: string },
-    opts: { maxPages: number },
-  ): Promise<HarvestComment[]> {
-    return this.paginate<HarvestComment>(
-      '/linkedin/profile-comments',
-      { [key.type === 'profileId' ? 'profileId' : 'profile']: key.value },
-      opts.maxPages,
-    );
-  }
-
-  /**
-   * Reactions by a person. The response carries no timestamp, so these cannot
-   * be scoped to a date window — treat them as "recent, undated" signal only.
-   */
-  async getProfileReactions(
-    key: { type: 'profileId' | 'url'; value: string },
-    opts: { maxPages: number },
-  ): Promise<HarvestReaction[]> {
-    return this.paginate<HarvestReaction>(
-      '/linkedin/profile-reactions',
-      { [key.type === 'profileId' ? 'profileId' : 'profile']: key.value },
-      opts.maxPages,
-    );
-  }
-
-  /** Walk `page` / `paginationToken` until exhausted or `maxPages` reached. */
-  private async paginate<T>(
-    path: string,
-    params: Record<string, string | undefined>,
-    maxPages: number,
-  ): Promise<T[]> {
-    const out: T[] = [];
-    let paginationToken: string | undefined;
-
-    for (let page = 1; page <= Math.max(1, maxPages); page++) {
-      const result = await this.request<HarvestEnvelope<T>>(path, {
-        ...params,
-        page: String(page),
-        paginationToken,
-      });
-
-      const batch = result.elements ?? [];
-      out.push(...batch);
-
-      const totalPages = result.pagination?.totalPages ?? 1;
-      paginationToken = result.pagination?.paginationToken ?? undefined;
-
-      // Stop on an empty page, the last page, or a missing continuation token.
-      if (batch.length === 0 || page >= totalPages) break;
-      if (!paginationToken) break;
-    }
-
-    return out;
-  }
 }
 
 /** Pull a human-readable message out of an error body. */

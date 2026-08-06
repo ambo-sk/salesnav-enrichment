@@ -3,3 +3,5 @@
 
 HARVEST_API_KEY=your-harvestapi-key
 OPENROUTER_API_KEY=sk-or-v1-...
+# Optional — omit to run without the contacts (email + phone) phase.
+SIMILARWEB_API_KEY=your-similarweb-key
