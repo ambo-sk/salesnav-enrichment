@@ -6,6 +6,7 @@ import {
   WorkerContact,
   RunSummary,
   Settings,
+  isCompanyListUrl,
 } from '../types';
 import {
   getScrapingState,
@@ -13,6 +14,8 @@ import {
   resetScrapingState,
   getScrapedProfiles,
   clearScrapedProfiles,
+  getScrapedCompanies,
+  clearScrapedCompanies,
   getSettings,
   getPushSession,
   savePushSession,
@@ -689,10 +692,26 @@ async function handleStartScraping(payload?: { targetPageCount?: number | null }
     scrapingTabId = tabs[0].id!;
   }
 
+  // Company list tab = company run: rows go to their own store, no enrichment.
+  // A new company run replaces any undownloaded company rows (same semantics
+  // as contacts, whose store is cleared above).
+  let mode: ScrapingState['mode'] = 'contacts';
+  try {
+    const tab = await chrome.tabs.get(scrapingTabId);
+    if (isCompanyListUrl(tab.url || '')) mode = 'companies';
+  } catch {
+    // Tab metadata unavailable — default to contacts.
+  }
+  if (mode === 'companies') {
+    console.log('[BACKGROUND] Company list detected — company scrape run (no enrichment)');
+    await clearScrapedCompanies();
+  }
+
   const target = payload?.targetPageCount;
   currentState = {
     ...INITIAL_SCRAPING_STATE,
     isActive: true,
+    mode,
     currentPage: 1,
     targetPageCount: typeof target === 'number' && target > 0 ? Math.floor(target) : null,
     scrapingTabId,
@@ -1077,9 +1096,13 @@ function handleSelectorDegraded(data: { tier3Count: number; consecutivePages: nu
 }
 
 /** Popup asks for the current run. */
-async function handleGetRun(): Promise<{ run: RunSummary | null; hasScraped: boolean }> {
-  const [state, scraped] = await Promise.all([getRunState(), getScrapedProfiles()]);
-  return { run: summarize(state), hasScraped: scraped.length > 0 };
+async function handleGetRun(): Promise<{ run: RunSummary | null; hasScraped: boolean; companyCount: number }> {
+  const [state, scraped, companies] = await Promise.all([
+    getRunState(),
+    getScrapedProfiles(),
+    getScrapedCompanies(),
+  ]);
+  return { run: summarize(state), hasScraped: scraped.length > 0, companyCount: companies.length };
 }
 
 /** Manual start, for auto-enrich off or a failed automatic start. */

@@ -1,4 +1,4 @@
-import { Settings, ScrapingState, PushSession, ScrapedProfile } from '../types';
+import { Settings, ScrapingState, PushSession, ScrapedProfile, ScrapedCompany } from '../types';
 import type { RunState } from '../enrichment/runner';
 
 // Default settings
@@ -24,10 +24,13 @@ const STATE_KEY = 'scrapingState';
 const PUSH_SESSION_KEY = 'currentPushSession';
 const RUN_KEY = 'enrichmentRun';              // chrome.storage.local — the whole run
 const SCRAPED_KEY = 'scrapedProfiles';
+const SCRAPED_COMPANIES_KEY = 'scrapedCompanies';
+const COMPANY_SEARCH_URLS_KEY = 'companySearchUrls';
 
 // Initial/empty scraping state — single source of truth for the shape.
 export const INITIAL_SCRAPING_STATE: ScrapingState = {
   isActive: false,
+  mode: 'contacts',
   currentPage: 0,
   totalScraped: 0,
   sessionPageCount: 0,
@@ -159,6 +162,62 @@ export async function clearScrapedProfiles(): Promise<void> {
     await chrome.storage.local.remove(SCRAPED_KEY);
   } catch (error) {
     console.error('Error clearing scraped profiles:', error);
+  }
+}
+
+// ─── Scraped companies (company-list runs — no enrichment, export only) ───
+
+export async function getScrapedCompanies(): Promise<ScrapedCompany[]> {
+  try {
+    const result = await chrome.storage.local.get(SCRAPED_COMPANIES_KEY);
+    return result[SCRAPED_COMPANIES_KEY] || [];
+  } catch (error) {
+    console.error('Error getting scraped companies:', error);
+    return [];
+  }
+}
+
+export async function appendScrapedCompanies(newCompanies: ScrapedCompany[]): Promise<void> {
+  try {
+    const existing = await getScrapedCompanies();
+    await chrome.storage.local.set({ [SCRAPED_COMPANIES_KEY]: [...existing, ...newCompanies] });
+  } catch (error) {
+    console.error('Error appending scraped companies:', error);
+  }
+}
+
+export async function clearScrapedCompanies(): Promise<void> {
+  try {
+    // Search URLs are derived from the company rows — they go together.
+    await chrome.storage.local.remove([SCRAPED_COMPANIES_KEY, COMPANY_SEARCH_URLS_KEY]);
+  } catch (error) {
+    console.error('Error clearing scraped companies:', error);
+  }
+}
+
+// Built Sales Nav people-search URLs for the scraped companies. Persisted
+// because clicking a link closes the popup — component state would be lost.
+export interface CompanySearchUrls {
+  urls: { url: string; companies: string[] }[];
+  unresolved: string[];
+  builtAt: string;
+}
+
+export async function getCompanySearchUrls(): Promise<CompanySearchUrls | null> {
+  try {
+    const result = await chrome.storage.local.get(COMPANY_SEARCH_URLS_KEY);
+    return result[COMPANY_SEARCH_URLS_KEY] || null;
+  } catch (error) {
+    console.error('Error getting company search URLs:', error);
+    return null;
+  }
+}
+
+export async function saveCompanySearchUrls(value: CompanySearchUrls): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [COMPANY_SEARCH_URLS_KEY]: value });
+  } catch (error) {
+    console.error('Error saving company search URLs:', error);
   }
 }
 

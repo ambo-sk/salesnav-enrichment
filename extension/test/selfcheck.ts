@@ -20,7 +20,12 @@ import {
 } from '../src/enrichment/enrich';
 import { buildDossier } from '../src/enrichment/dossier';
 import { contactKey, indexContacts } from '../src/enrichment/contacts';
-import { buildWorkbook, workbookFilename } from '../src/enrichment/xlsx';
+import {
+  buildWorkbook,
+  workbookFilename,
+  buildCompanyWorkbook,
+  companyWorkbookFilename,
+} from '../src/enrichment/xlsx';
 import {
   collectScoredContacts,
   createRunState,
@@ -507,6 +512,71 @@ async function main() {
     // the row it belongs to: contact 100 scores 100 and must lead.
     assert.equal(contacts[0]['Company Name'], 'Company 100', 'rows are not sorted best-fit first');
     assert.ok(buffer.byteLength < 12 * 1024 * 1024, `workbook is ${buffer.byteLength} bytes`);
+  });
+
+  await check('company workbook opens, keeps its columns, and stays formula-inert', async () => {
+    const buffer = await buildCompanyWorkbook(
+      [
+        {
+          name: '=HYPERLINK("http://evil.example")',
+          industry: 'Financial Services',
+          employees: '51-200',
+          location: 'London, England',
+          about: 'Cross-border payments.',
+          companyUrl: 'https://www.linkedin.com/sales/company/12345',
+          scrapedAt: new Date(NOW).toISOString(),
+        },
+        {
+          name: 'Acme Payments',
+          industry: '',
+          employees: '10K+',
+          location: '',
+          about: '',
+          companyUrl: 'https://www.linkedin.com/sales/company/67890',
+          scrapedAt: new Date(NOW).toISOString(),
+        },
+      ],
+      NOW,
+    );
+
+    const book = XLSX.read(buffer, { type: 'array' });
+    assert.deepEqual(book.SheetNames, ['Companies']);
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(book.Sheets['Companies'], {
+      defval: '',
+    });
+    assert.equal(rows.length, 2);
+    // Inline strings, never formulas: the scraped name survives verbatim as text.
+    assert.equal(rows[0]['Company Name'], '=HYPERLINK("http://evil.example")');
+    assert.equal(rows[0]['Employees'], '51-200');
+    assert.equal(rows[1]['Company Name'], 'Acme Payments');
+    assert.match(String(rows[1]['Sales Navigator URL']), /sales\/company\/67890/);
+    assertValidZip(buffer);
+  });
+
+  await check('company search URLs encode filters and chunk at 20 companies', async () => {
+    const { buildCompanySearchUrls } = await import('../src/utils/salesnav-url');
+
+    const one = buildCompanySearchUrls([{ id: '162479', text: 'Apple Inc.' }]);
+    assert.equal(one.length, 1);
+    assert.match(one[0].url, /^https:\/\/www\.linkedin\.com\/sales\/search\/people\?query=/);
+    assert.match(one[0].url, /CURRENT_COMPANY/);
+    assert.match(one[0].url, /id%3A162479/);
+    // Space double-encodes to %2520; dot passes through encodeURIComponent.
+    assert.match(one[0].url, /Apple%2520Inc\./);
+    assert.deepEqual(one[0].companies, ['Apple Inc.']);
+
+    const many = buildCompanySearchUrls(
+      Array.from({ length: 45 }, (_, i) => ({ id: `${i}`, text: `Co ${i}` })),
+    );
+    assert.equal(many.length, 3);
+    assert.equal(many[0].companies.length, 20);
+    assert.equal(many[2].companies.length, 5);
+  });
+
+  await check('companyWorkbookFilename is filesystem safe', () => {
+    const name = companyWorkbookFilename('UK / Fintechs!', '2026-08-01T10:20:30.000Z');
+    assert.match(name, /^UK_Fintechs__companies__.*\.xlsx$/);
+    assert.ok(!/[/\\:*?"<>|]/.test(name), `unsafe characters in ${name}`);
   });
 
   await check('workbookFilename is filesystem safe and carries the label', () => {

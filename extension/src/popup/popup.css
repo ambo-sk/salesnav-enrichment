@@ -402,7 +402,9 @@ body {
 
 .progress-fill {
   height: 100%;
+  width: 100%;
   background: #0a66c2;
   border-radius: 3px;
-  transition: width 0.4s ease;
+  transform-origin: left;
+  transition: transform 0.4s ease;
 }

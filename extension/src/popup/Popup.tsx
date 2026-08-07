@@ -1,10 +1,27 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ScrapingState, ScraperStatus, RunSummary, Settings } from '../types';
+import { ScrapingState, ScraperStatus, RunSummary, Settings, isCompanyListUrl } from '../types';
 import { sendToBackground } from '../utils/messaging';
-import { getSettings, saveSettings, getRunState, INITIAL_SCRAPING_STATE } from '../utils/storage';
+import {
+  getSettings,
+  saveSettings,
+  getRunState,
+  getScrapedCompanies,
+  clearScrapedCompanies,
+  getCompanySearchUrls,
+  saveCompanySearchUrls,
+  type CompanySearchUrls,
+  INITIAL_SCRAPING_STATE,
+} from '../utils/storage';
+import { normalizeWorkerUrl, resolveCompanies } from '../utils/worker-api';
+import { buildCompanySearchUrls } from '../utils/salesnav-url';
 import { getDailyCount, isWithinWorkingHours, getCooldownRemaining } from '../utils/safety';
 import { collectScoredContacts } from '../enrichment/runner';
-import { buildWorkbook, workbookFilename } from '../enrichment/xlsx';
+import {
+  buildWorkbook,
+  workbookFilename,
+  buildCompanyWorkbook,
+  companyWorkbookFilename,
+} from '../enrichment/xlsx';
 
 const Popup: React.FC = () => {
   const [status, setStatus] = useState<ScraperStatus>('idle');
@@ -30,6 +47,8 @@ const Popup: React.FC = () => {
   // Enrichment run
   const [run, setRun] = useState<RunSummary | null>(null);
   const [hasScraped, setHasScraped] = useState<boolean>(false);
+  const [companyCount, setCompanyCount] = useState<number>(0);
+  const [searchUrls, setSearchUrls] = useState<CompanySearchUrls | null>(null);
   const [busy, setBusy] = useState<string>('');
   const [configured, setConfigured] = useState<boolean>(true);
 
@@ -118,11 +137,13 @@ const Popup: React.FC = () => {
 
   const loadRun = async () => {
     try {
-      const payload = await sendToBackground<{ run: RunSummary | null; hasScraped: boolean }>('GET_RUN');
+      const payload = await sendToBackground<{ run: RunSummary | null; hasScraped: boolean; companyCount: number }>('GET_RUN');
       if (payload) {
         setRun(payload.run);
         setHasScraped(payload.hasScraped);
+        setCompanyCount(payload.companyCount ?? 0);
       }
+      setSearchUrls(await getCompanySearchUrls());
     } catch (err) {
       console.error('Failed to load run:', err);
     }
@@ -172,7 +193,10 @@ const Popup: React.FC = () => {
 
     try {
       const settings = await getSettings();
-      if (!settings.workerUrl || !settings.apiToken) {
+      // Company-list runs never touch the worker — no config needed for them.
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const companyRun = isCompanyListUrl(activeTab?.url || '');
+      if (!companyRun && (!settings.workerUrl || !settings.apiToken)) {
         setError('Configure the worker URL and API token in Settings first');
         return;
       }
@@ -277,6 +301,100 @@ const Popup: React.FC = () => {
       const message = err instanceof Error ? err.message : 'Export failed';
       setError(message);
       addLog(`Export failed: ${message}`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  /** Company-list export — plain workbook straight from storage, no enrichment. */
+  const handleCompanyDownload = async () => {
+    setError('');
+    setBusy('company-download');
+    try {
+      const companies = await getScrapedCompanies();
+      if (companies.length === 0) {
+        setError('No companies to export yet.');
+        return;
+      }
+
+      const now = Date.now();
+      const buffer = await buildCompanyWorkbook(companies, now);
+      const filename = companyWorkbookFilename(label || 'companies', new Date(now).toISOString());
+      const blob = new Blob([buffer as unknown as BlobPart], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+
+      addLog(`Downloaded ${filename} (${companies.length} companies)`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Export failed';
+      setError(message);
+      addLog(`Export failed: ${message}`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const handleCompanyClear = async () => {
+    setBusy('company-clear');
+    try {
+      await clearScrapedCompanies();
+      setCompanyCount(0);
+      setSearchUrls(null);
+      addLog('Cleared scraped companies');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  /**
+   * Company names -> Lix ids (via worker) -> people-search URLs, 20 companies
+   * per URL. Persisted so the links survive the popup closing.
+   */
+  const handleBuildSearchUrls = async () => {
+    setError('');
+    setBusy('build-urls');
+    try {
+      const settings = await getSettings();
+      if (!settings.workerUrl || !settings.apiToken) {
+        setError('Building URLs needs the worker — configure URL and API token in Settings.');
+        return;
+      }
+
+      const companies = await getScrapedCompanies();
+      const names = [...new Set(companies.map((c) => c.name.trim()).filter(Boolean))];
+      if (names.length === 0) {
+        setError('No companies to build from.');
+        return;
+      }
+
+      addLog(`Resolving ${names.length} companies via Lix…`);
+      const { resolved, unresolved } = await resolveCompanies(
+        { workerUrl: normalizeWorkerUrl(settings.workerUrl), apiToken: settings.apiToken },
+        names,
+      );
+      if (resolved.length === 0) {
+        setError('None of the companies could be resolved on LinkedIn.');
+        return;
+      }
+
+      const built: CompanySearchUrls = {
+        urls: buildCompanySearchUrls(resolved),
+        unresolved,
+        builtAt: new Date().toISOString(),
+      };
+      await saveCompanySearchUrls(built);
+      setSearchUrls(built);
+      addLog(`Built ${built.urls.length} search URL(s), ${unresolved.length} unresolved`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'URL build failed';
+      setError(message);
+      addLog(`URL build failed: ${message}`);
     } finally {
       setBusy('');
     }
@@ -444,6 +562,69 @@ const Popup: React.FC = () => {
         </button>
       </div>
 
+      {/* Companies — list-scrape only, downloadable as soon as rows exist */}
+      {companyCount > 0 && (
+        <div className="jobs-section">
+          <div className="jobs-header">Companies</div>
+          <div className="job-row">
+            <span className="job-meta">{companyCount} companies scraped</span>
+          </div>
+          <button
+            className="btn btn-download"
+            onClick={handleCompanyDownload}
+            disabled={busy !== '' || state.isActive}
+          >
+            {busy === 'company-download' ? 'Building…' : 'Download Companies Excel'}
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={handleBuildSearchUrls}
+            disabled={busy !== '' || state.isActive}
+            title="Resolve company names on LinkedIn (via Lix) and build people-search URLs filtered to these companies, 20 per URL."
+          >
+            {busy === 'build-urls' ? 'Resolving…' : 'Build lead search URLs'}
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={handleCompanyClear}
+            disabled={busy !== '' || state.isActive}
+          >
+            {busy === 'company-clear' ? 'Clearing…' : 'Clear companies'}
+          </button>
+
+          {searchUrls && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+              {searchUrls.urls.map((entry, index) => (
+                <div key={index} className="job-row" style={{ alignItems: 'center', gap: 8 }}>
+                  <a
+                    href={entry.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="job-label"
+                    title={entry.companies.join(', ')}
+                    style={{ flex: 1 }}
+                  >
+                    Search {index + 1} ({entry.companies.length} companies)
+                  </a>
+                  <button
+                    className="btn-copy-logs"
+                    onClick={() => navigator.clipboard.writeText(entry.url)}
+                    title="Copy URL"
+                  >
+                    Copy
+                  </button>
+                </div>
+              ))}
+              {searchUrls.unresolved.length > 0 && (
+                <span className="job-meta" title={searchUrls.unresolved.join(', ')}>
+                  {searchUrls.unresolved.length} not found on LinkedIn
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Enrichment */}
       {(run || hasScraped) && (
         <div className="jobs-section">
@@ -464,7 +645,7 @@ const Popup: React.FC = () => {
               </div>
               {run.active && (
                 <div className="progress-track">
-                  <div className="progress-fill" style={{ width: `${percent}%` }} />
+                  <div className="progress-fill" style={{ transform: `scaleX(${percent / 100})` }} />
                 </div>
               )}
             </div>
@@ -563,7 +744,7 @@ const Popup: React.FC = () => {
       </div>
 
       <div className="footer">
-        <small>Make sure you're on a Sales Navigator lead list page</small>
+        <small>Works on Sales Navigator lead lists and company lists</small>
         <small className="version-text">v{chrome.runtime.getManifest().version}</small>
       </div>
     </div>

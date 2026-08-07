@@ -1,5 +1,5 @@
-import { ScrapedProfile, Message } from '../types';
-import { appendScrapedProfiles } from '../utils/storage';
+import { ScrapedProfile, ScrapedCompany, Message, isCompanyListUrl } from '../types';
+import { appendScrapedProfiles, appendScrapedCompanies } from '../utils/storage';
 import { getGaussianDelayMs } from '../utils/timing';
 import { simulateHumanClick } from '../utils/interaction';
 
@@ -134,11 +134,112 @@ function extractProfileData(listItem: Element): { profile: ScrapedProfile | null
   }
 }
 
+// ─── Company list scraping ───
+//
+// Company search results reuse the same artdeco card list as people search.
+// Saved account lists (/sales/lists/company/...) render as a <table> instead —
+// the fallback below handles those rows best-effort.
+
+/**
+ * Extract one company from a list row (card or table row).
+ * Everything free in the row DOM: name, URL, industry, headcount, location, blurb.
+ */
+function extractCompanyData(listItem: Element): ScrapedCompany | null {
+  try {
+    const linkElement = listItem.querySelector('a[href*="/sales/company/"]');
+    const href = linkElement?.getAttribute('href') || '';
+
+    const name =
+      listItem.querySelector('[data-anonymize="company-name"]')?.textContent?.trim() ||
+      listItem.querySelector('.artdeco-entity-lockup__title')?.textContent?.trim() ||
+      linkElement?.textContent?.trim() || '';
+
+    if (!name || !href) return null;
+    // Selector artifact leaked into text — same guard as validateProfile.
+    if (/^[.\[#]|artdeco|ember|^data-/i.test(name)) return null;
+
+    const industry =
+      listItem.querySelector('[data-anonymize="industry"]')?.textContent?.trim() || '';
+    const location =
+      listItem.querySelector('[data-anonymize="location"]')?.textContent?.trim() || '';
+    const about =
+      listItem.querySelector('[data-anonymize="company-blurb"]')?.textContent?.trim() || '';
+
+    // Headcount appears as "51-200 employees" / "10K+ employees" somewhere in
+    // the row text — regex over textContent survives selector churn.
+    const employeesMatch = (listItem.textContent || '').match(
+      /([\d.,]+\s*[KM+]*(?:\s*-\s*[\d.,]+\s*[KM+]*)?)\s+employees/i,
+    );
+    const employees = employeesMatch ? employeesMatch[1].replace(/\s+/g, '') : '';
+
+    return {
+      name,
+      industry,
+      employees,
+      location,
+      about,
+      companyUrl: href.startsWith('http') ? href : `https://www.linkedin.com${href}`,
+      scrapedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    errorLog('[CONTENT] Error extracting company data:', error);
+    return null;
+  }
+}
+
+/**
+ * Scrape all companies on the current page. Mirrors scrapeCurrentPage but with
+ * company selectors and a table-row fallback for saved account lists.
+ */
+async function scrapeCompanyPage(): Promise<ScrapedCompany[]> {
+  log('[CONTENT] Scraping company list page...');
+  log(`[CONTENT] Current URL: ${window.location.href}`);
+
+  const loaded = await waitForElements(
+    '[data-anonymize="company-name"], .artdeco-entity-lockup__title',
+    10000,
+  );
+  if (!loaded) {
+    log('[CONTENT] WARNING: Content may not be fully loaded, attempting to scrape anyway');
+  }
+
+  // Card layout (search results) first, table layout (saved account lists) second.
+  let listItems: Element[] = Array.from(document.querySelectorAll('.artdeco-list__item'));
+  if (listItems.length === 0) {
+    listItems = Array.from(document.querySelectorAll('table tbody tr')).filter((row) =>
+      row.querySelector('a[href*="/sales/company/"]'),
+    );
+    if (listItems.length > 0) log(`[CONTENT] Using table-row fallback (saved account list)`);
+  }
+
+  if (listItems.length === 0) {
+    log('[CONTENT] ERROR: No company list rows found on page');
+    return [];
+  }
+  log(`[CONTENT] Found ${listItems.length} company rows`);
+
+  await scrollItemsIntoView(listItems);
+
+  const companies: ScrapedCompany[] = [];
+  listItems.forEach((item, index) => {
+    const company = extractCompanyData(item);
+    if (company) {
+      companies.push(company);
+      debugLog(`[CONTENT] Extracted company ${index + 1}: ${company.name}`);
+    } else {
+      debugLog(`[CONTENT] Failed to extract company from row ${index + 1}`);
+    }
+  });
+
+  log(`[CONTENT] Extraction complete: ${companies.length}/${listItems.length} companies scraped`);
+  return companies;
+}
+
 /**
  * Scroll all lazy-loaded items into view to trigger loading.
  * Uses humanized timing with occasional batch scrolls and reading pauses.
  */
-async function scrollItemsIntoView(items: NodeListOf<Element>): Promise<void> {
+async function scrollItemsIntoView(items: ArrayLike<Element>): Promise<void> {
   log('[CONTENT] Scrolling items into view to trigger lazy loading...');
 
   let i = 0;
@@ -272,11 +373,13 @@ async function scrapeCurrentPage(): Promise<ScrapedProfile[]> {
  * between pages even if the URL pattern doesn't).
  */
 function getPageFingerprint(): string {
-  const leadHrefs = Array.from(document.querySelectorAll('a[href*="/sales/lead/"]'))
+  const rowHrefs = Array.from(
+    document.querySelectorAll('a[href*="/sales/lead/"], a[href*="/sales/company/"]'),
+  )
     .slice(0, 3)
     .map((a) => a.getAttribute('href') || '')
     .join('|');
-  return `${window.location.href}::${leadHrefs}`;
+  return `${window.location.href}::${rowHrefs}`;
 }
 
 /**
@@ -403,17 +506,22 @@ async function performScrape(page: number) {
   }
 
   try {
-    // Scrape current page
+    // Scrape current page — company lists go to their own store, contacts to theirs.
     log('[CONTENT] Starting DOM scraping...');
-    const profiles = await scrapeCurrentPage();
-    log(`[CONTENT] DOM scraping complete: ${profiles.length} profiles found`);
-
-    if (profiles.length === 0) {
-      log('[CONTENT] WARNING: No profiles found on this page');
+    let scrapedCount: number;
+    if (isCompanyListUrl(window.location.pathname)) {
+      const companies = await scrapeCompanyPage();
+      scrapedCount = companies.length;
+      if (companies.length > 0) await appendScrapedCompanies(companies);
     } else {
-      log(`[CONTENT] Saving ${profiles.length} profiles to storage...`);
-      await appendScrapedProfiles(profiles);
-      log('[CONTENT] Profiles saved to storage');
+      const profiles = await scrapeCurrentPage();
+      scrapedCount = profiles.length;
+      if (profiles.length > 0) await appendScrapedProfiles(profiles);
+    }
+    log(`[CONTENT] DOM scraping complete: ${scrapedCount} rows saved`);
+
+    if (scrapedCount === 0) {
+      log('[CONTENT] WARNING: No rows found on this page');
     }
 
     // Check for next page
@@ -429,7 +537,7 @@ async function performScrape(page: number) {
     chrome.runtime.sendMessage({
       action: 'PAGE_COMPLETE',
       data: {
-        scrapedCount: profiles.length,
+        scrapedCount,
         hasNextPage,
       },
     }).catch((err) => {

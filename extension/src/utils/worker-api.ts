@@ -143,6 +143,47 @@ export async function finishRun(
   }
 }
 
+// ─── Lix company resolution (company list -> Sales Nav URL) ───
+
+export interface LixResolveResult {
+  resolved: { query: string; id: string; text: string }[];
+  unresolved: string[];
+}
+
+/** Worker caps a /proxy/lix call at 20 names (free-plan subrequest budget). */
+const LIX_BATCH_SIZE = 20;
+
+/**
+ * Resolve company names to LinkedIn facet ids via the worker's Lix proxy.
+ * Sequential batches — each worker invocation has its own subrequest budget.
+ */
+export async function resolveCompanies(
+  config: WorkerConfig,
+  names: string[],
+): Promise<LixResolveResult> {
+  const resolved: LixResolveResult['resolved'] = [];
+  const unresolved: string[] = [];
+
+  for (let i = 0; i < names.length; i += LIX_BATCH_SIZE) {
+    const batch = names.slice(i, i + LIX_BATCH_SIZE);
+    const response = await call(config, '/proxy/lix', {
+      method: 'POST',
+      body: JSON.stringify({ names: batch }),
+    });
+    const data = (await response.json()) as Partial<LixResolveResult>;
+    resolved.push(...(data.resolved ?? []));
+    unresolved.push(...(data.unresolved ?? []));
+  }
+
+  // Same company can appear on many scraped pages under slightly different
+  // names — Lix resolves them to one id; dedupe across batches.
+  const seen = new Set<string>();
+  return {
+    resolved: resolved.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true))),
+    unresolved,
+  };
+}
+
 export interface RunSummary {
   id: string;
   label: string | null;

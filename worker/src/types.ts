@@ -14,6 +14,8 @@ export interface Env {
   OPENROUTER_API_KEY: string;
   /** Optional. Absent = the contacts phase is reported off in GET /config. */
   SIMILARWEB_API_KEY: string;
+  /** Optional. Absent = POST /proxy/lix returns 501 (company URL builder off). */
+  LIX_API_KEY: string;
 
   // Vars
   OPENROUTER_MODEL: string;

@@ -37,6 +37,23 @@ export interface ScrapedProfile {
   scrapedAt: string;
 }
 
+// One company row from a company search / saved account list. Companies are
+// list-scrape only — they never enter the enrichment pipeline.
+export interface ScrapedCompany {
+  name: string;
+  industry: string;
+  employees: string;
+  location: string;
+  about: string;
+  companyUrl: string;
+  scrapedAt: string;
+}
+
+/** Company search results or saved account lists — both render company rows. */
+export function isCompanyListUrl(url: string): boolean {
+  return /\/sales\/(search|lists)\/compan/i.test(url);
+}
+
 // Extension settings stored in chrome.storage
 export interface Settings {
   // Base URL of the Cloudflare enrichment worker, e.g.
@@ -69,6 +86,9 @@ export interface Settings {
 // module state is lost.
 export interface ScrapingState {
   isActive: boolean;
+  // What the current run scrapes. Decided from the tab URL at start; company
+  // runs write to a separate store and never trigger enrichment.
+  mode: 'contacts' | 'companies';
   currentPage: number;
   totalScraped: number;
   sessionPageCount: number;

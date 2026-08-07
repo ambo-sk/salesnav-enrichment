@@ -16,6 +16,7 @@
  */
 
 import type { HarvestCompany, HarvestProfile, ScoredContact } from './harvest-types';
+import type { ScrapedCompany } from '../types';
 import { currentPositions } from './enrich';
 import { dosStamp, zip, type ZipEntry } from './zip';
 
@@ -296,16 +297,23 @@ function contactRow(item: ScoredContact, now: number): Cell[] {
 
 // ─── Static OOXML parts ───
 
-const CONTENT_TYPES =
-  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-  '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
-  '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
-  '<Default Extension="xml" ContentType="application/xml"/>' +
-  '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
-  '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
-  '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
-  '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
-  '</Types>';
+function contentTypesXml(sheetCount: number): string {
+  const overrides = Array.from(
+    { length: sheetCount },
+    (_, i) =>
+      `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`,
+  ).join('');
+  return (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+    overrides +
+    '</Types>'
+  );
+}
 
 const ROOT_RELS =
   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
@@ -313,24 +321,33 @@ const ROOT_RELS =
   '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
   '</Relationships>';
 
-const WORKBOOK_RELS =
-  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-  '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
-  '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>' +
-  '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
-  '</Relationships>';
+/** Sheets take rId1..rIdN; styles is rId(N+1). */
+function workbookRelsXml(sheetCount: number): string {
+  const sheets = Array.from(
+    { length: sheetCount },
+    (_, i) =>
+      `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`,
+  ).join('');
+  return (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    sheets +
+    `<Relationship Id="rId${sheetCount + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+    '</Relationships>'
+  );
+}
 
-const SHEET_NAMES = ['Scored Contacts', 'Run Info'];
-
-const WORKBOOK =
-  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
-  '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
-  'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
-  SHEET_NAMES.map(
-    (name, index) => `<sheet name="${xml(name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`,
-  ).join('') +
-  '</sheets></workbook>';
+function workbookXml(names: string[]): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+    names
+      .map((name, index) => `<sheet name="${xml(name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`)
+      .join('') +
+    '</sheets></workbook>'
+  );
+}
 
 // Two cell formats: 0 = default, 1 = bold (the header row).
 const STYLES =
@@ -344,6 +361,25 @@ const STYLES =
   '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
   '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>' +
   '</styleSheet>';
+
+/** Zip the standard OOXML scaffolding plus the given sheets. */
+async function assembleWorkbook(
+  sheets: { name: string; spec: SheetSpec }[],
+  now: number,
+): Promise<Uint8Array> {
+  const entries: ZipEntry[] = [
+    { name: '[Content_Types].xml', chunks: () => [contentTypesXml(sheets.length)] },
+    { name: '_rels/.rels', chunks: () => [ROOT_RELS] },
+    { name: 'xl/workbook.xml', chunks: () => [workbookXml(sheets.map((s) => s.name))] },
+    { name: 'xl/_rels/workbook.xml.rels', chunks: () => [workbookRelsXml(sheets.length)] },
+    { name: 'xl/styles.xml', chunks: () => [STYLES] },
+    ...sheets.map((sheet, index) => ({
+      name: `xl/worksheets/sheet${index + 1}.xml`,
+      chunks: () => sheetXml(sheet.spec),
+    })),
+  ];
+  return zip(entries, dosStamp(new Date(now)));
+}
 
 // ─── Public API ───
 
@@ -399,48 +435,96 @@ export async function buildWorkbook(
     ['ICP used for scoring', meta.icp],
   ];
 
-  const sheets: SheetSpec[] = [
-    {
-      columns: CONTACT_COLUMNS,
-      rows: () => sorted.map((item) => contactRow(item, now)),
-      rowCount: sorted.length,
-      freezeHeader: true,
-      autoFilter: true,
-    },
-    {
-      columns: [
-        { header: 'Job ID', width: 30 },
-        { header: meta.jobId, width: 110 },
-      ],
-      rows: () => infoRows,
-      rowCount: infoRows.length,
-      freezeHeader: false,
-      autoFilter: false,
-    },
-  ];
+  return assembleWorkbook(
+    [
+      {
+        name: 'Scored Contacts',
+        spec: {
+          columns: CONTACT_COLUMNS,
+          rows: () => sorted.map((item) => contactRow(item, now)),
+          rowCount: sorted.length,
+          freezeHeader: true,
+          autoFilter: true,
+        },
+      },
+      {
+        name: 'Run Info',
+        spec: {
+          columns: [
+            { header: 'Job ID', width: 30 },
+            { header: meta.jobId, width: 110 },
+          ],
+          rows: () => infoRows,
+          rowCount: infoRows.length,
+          freezeHeader: false,
+          autoFilter: false,
+        },
+      },
+    ],
+    now,
+  );
+}
 
-  const entries: ZipEntry[] = [
-    { name: '[Content_Types].xml', chunks: () => [CONTENT_TYPES] },
-    { name: '_rels/.rels', chunks: () => [ROOT_RELS] },
-    { name: 'xl/workbook.xml', chunks: () => [WORKBOOK] },
-    { name: 'xl/_rels/workbook.xml.rels', chunks: () => [WORKBOOK_RELS] },
-    { name: 'xl/styles.xml', chunks: () => [STYLES] },
-    ...sheets.map((spec, index) => ({
-      name: `xl/worksheets/sheet${index + 1}.xml`,
-      chunks: () => sheetXml(spec),
-    })),
-  ];
+const COMPANY_COLUMNS: { header: string; width: number }[] = [
+  { header: 'Company Name', width: 32 },
+  { header: 'Sales Navigator URL', width: 48 },
+  { header: 'Industry', width: 28 },
+  { header: 'Employees', width: 14 },
+  { header: 'Location', width: 30 },
+  { header: 'About', width: 70 },
+  { header: 'Scraped At (UTC)', width: 22 },
+];
 
-  return zip(entries, dosStamp(new Date(now)));
+/** Single-sheet workbook for a company-list scrape — no enrichment data. */
+export async function buildCompanyWorkbook(
+  companies: ScrapedCompany[],
+  now: number,
+): Promise<Uint8Array> {
+  return assembleWorkbook(
+    [
+      {
+        name: 'Companies',
+        spec: {
+          columns: COMPANY_COLUMNS,
+          rows: () =>
+            companies.map((c) => [
+              cell(c.name),
+              cell(c.companyUrl),
+              cell(c.industry),
+              cell(c.employees),
+              cell(c.location),
+              cell(c.about),
+              cell(c.scrapedAt),
+            ]),
+          rowCount: companies.length,
+          freezeHeader: true,
+          autoFilter: true,
+        },
+      },
+    ],
+    now,
+  );
+}
+
+function slugOf(label: string): string {
+  return (
+    (label || 'salesnav')
+      .replace(/[^a-zA-Z0-9_-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 50) || 'salesnav'
+  );
+}
+
+function stampOf(isoDate: string): string {
+  return isoDate.replace(/[:.]/g, '-').replace(/T/, '_').slice(0, 19);
 }
 
 /** Filesystem-safe workbook name. */
 export function workbookFilename(label: string, jobId: string, createdAt: string): string {
-  const slug =
-    (label || 'salesnav')
-      .replace(/[^a-zA-Z0-9_-]+/g, '_')
-      .replace(/^_+|_+$/g, '')
-      .slice(0, 50) || 'salesnav';
-  const stamp = createdAt.replace(/[:.]/g, '-').replace(/T/, '_').slice(0, 19);
-  return `${slug}__${stamp}__${jobId.slice(0, 8)}.xlsx`;
+  return `${slugOf(label)}__${stampOf(createdAt)}__${jobId.slice(0, 8)}.xlsx`;
+}
+
+/** Filesystem-safe company workbook name. */
+export function companyWorkbookFilename(label: string, createdAt: string): string {
+  return `${slugOf(label)}__companies__${stampOf(createdAt)}.xlsx`;
 }

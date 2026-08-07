@@ -6,6 +6,7 @@
  *   POST /proxy/harvest       {path, params} -> HarvestAPI, key attached here
  *   POST /proxy/score         {dossier} -> Score, prompt + ICP + model applied here
  *   POST /proxy/contacts      {contacts} -> Similarweb emails + phones, key attached here
+ *   POST /proxy/lix           {names} -> Lix company facet ids, key attached here
  *   POST /runs                start a run, returns its id
  *   POST /runs/:id/finish     record totals
  *   GET  /runs                this user's recent runs
@@ -252,6 +253,103 @@ async function handleContactsProxy(
   });
 }
 
+/**
+ * Lix facet resolver: company names in, LinkedIn company facet {id, text} out.
+ * Used by the extension to turn a scraped company list into Sales Navigator
+ * people-search URLs (CURRENT_COMPANY filter needs LinkedIn's internal ids).
+ *
+ * Batch size and retries are budgeted against the Workers free plan's 50
+ * subrequests per invocation: 20 names × (1 fetch + 1 retry) = 40 max.
+ */
+const LIX_FACET_URL = 'https://api.lix-it.com/v1/search/sales/facet';
+const MAX_LIX_NAMES = 20;
+const LIX_CONCURRENCY = 5;
+
+async function resolveLixCompany(
+  name: string,
+  apiKey: string,
+): Promise<{ id: string; text: string } | null> {
+  const url = `${LIX_FACET_URL}?query=${encodeURIComponent(name)}&type=COMPANY&count=5&start=0`;
+  try {
+    let res = await fetch(url, { headers: { Authorization: apiKey, Accept: 'application/json' } });
+    if (res.status === 429) {
+      await new Promise((resolve) => setTimeout(resolve, 2500 + Math.random() * 500));
+      res = await fetch(url, { headers: { Authorization: apiKey, Accept: 'application/json' } });
+    }
+    if (!res.ok) return null;
+    const data = (await res.json()) as { data?: { elements?: { id: string; displayValue: string }[] } };
+    const el = data?.data?.elements?.[0];
+    return el ? { id: el.id, text: el.displayValue } : null;
+  } catch {
+    return null; // best-effort per name — caller reports it as unresolved
+  }
+}
+
+async function handleLixProxy(
+  request: Request,
+  env: Env,
+  user: AuthedUser,
+  cors: Record<string, string>,
+): Promise<Response> {
+  if (!env.LIX_API_KEY) {
+    return json({ error: 'company URL builder is not configured on this worker' }, 501, cors);
+  }
+
+  let body: { names?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return json({ error: 'invalid JSON body' }, 400, cors);
+  }
+
+  const names = (Array.isArray(body.names) ? body.names : [])
+    .filter((n): n is string => typeof n === 'string')
+    .map((n) => n.trim())
+    .filter((n) => n.length > 0 && n.length <= MAX_PARAM_LENGTH);
+  if (names.length === 0) {
+    return json({ error: '`names` must hold at least one company name' }, 400, cors);
+  }
+  if (names.length > MAX_LIX_NAMES) {
+    return json({ error: `at most ${MAX_LIX_NAMES} names per request` }, 400, cors);
+  }
+
+  // Metered on the harvest counter like the contacts proxy: it spends real
+  // upstream credits per name the same way.
+  const allowed = await checkAndRecordUsage(env, user.id, 'harvest', {
+    limit: intVar(env.DAILY_HARVEST_CALL_LIMIT, 20000),
+  });
+  if (!allowed) {
+    return json({ error: 'daily call limit reached for this token' }, 429, cors);
+  }
+
+  const results: ({ id: string; text: string } | null)[] = new Array(names.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(LIX_CONCURRENCY, names.length) }, async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= names.length) return;
+        results[i] = await resolveLixCompany(names[i], env.LIX_API_KEY);
+      }
+    }),
+  );
+
+  const seen = new Set<string>();
+  const resolved: { query: string; id: string; text: string }[] = [];
+  const unresolved: string[] = [];
+  names.forEach((name, i) => {
+    const el = results[i];
+    if (el && !seen.has(el.id)) {
+      seen.add(el.id);
+      resolved.push({ query: name, ...el });
+    } else if (!el) {
+      unresolved.push(name);
+    }
+  });
+
+  return json({ resolved, unresolved }, 200, cors);
+}
+
 async function handleScoreProxy(
   request: Request,
   env: Env,
@@ -324,6 +422,10 @@ export default {
 
       if (path === '/proxy/score' && request.method === 'POST') {
         return await handleScoreProxy(request, env, user, cors);
+      }
+
+      if (path === '/proxy/lix' && request.method === 'POST') {
+        return await handleLixProxy(request, env, user, cors);
       }
 
       if (path === '/runs' && request.method === 'POST') {
