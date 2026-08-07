@@ -153,14 +153,21 @@ export interface LixResolveResult {
 /** Worker caps a /proxy/lix call at 20 names (free-plan subrequest budget). */
 const LIX_BATCH_SIZE = 20;
 
-/**
- * Resolve company names to LinkedIn facet ids via the worker's Lix proxy.
- * Sequential batches — each worker invocation has its own subrequest budget.
- */
-export async function resolveCompanies(
-  config: WorkerConfig,
-  names: string[],
-): Promise<LixResolveResult> {
+/** Legal suffixes and decorations that make Lix miss an otherwise-findable
+ *  company page. Only applied on a retry after the raw name failed. */
+const LEGAL_SUFFIX =
+  /[\s,.]+(ltd|limited|inc|incorporated|llc|llp|plc|pllc|gmbh|ag|sa|sarl|sas|srl|spa|bv|nv|ab|aps|oyj?|pty|pte|co|corp|corporation|company|holdings?|group)\.?$/i;
+
+export function cleanCompanyName(name: string): string {
+  let out = name.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  for (let prev = ''; prev !== out; ) {
+    prev = out;
+    out = out.replace(LEGAL_SUFFIX, '').trim();
+  }
+  return out;
+}
+
+async function resolveBatches(config: WorkerConfig, names: string[]): Promise<LixResolveResult> {
   const resolved: LixResolveResult['resolved'] = [];
   const unresolved: string[] = [];
 
@@ -173,6 +180,39 @@ export async function resolveCompanies(
     const data = (await response.json()) as Partial<LixResolveResult>;
     resolved.push(...(data.resolved ?? []));
     unresolved.push(...(data.unresolved ?? []));
+  }
+
+  return { resolved, unresolved };
+}
+
+/**
+ * Resolve company names to LinkedIn facet ids via the worker's Lix proxy.
+ * Sequential batches — each worker invocation has its own subrequest budget.
+ * Names that fail as scraped are retried once with legal suffixes stripped
+ * ("Acme Payments Ltd." -> "Acme Payments").
+ */
+export async function resolveCompanies(
+  config: WorkerConfig,
+  names: string[],
+): Promise<LixResolveResult> {
+  const first = await resolveBatches(config, names);
+
+  // cleaned -> original, so recovered names are reported under what was scraped
+  const retry = new Map<string, string>();
+  for (const original of first.unresolved) {
+    const cleaned = cleanCompanyName(original);
+    if (cleaned && cleaned !== original && !retry.has(cleaned)) retry.set(cleaned, original);
+  }
+
+  let resolved = first.resolved;
+  let unresolved = first.unresolved;
+  if (retry.size > 0) {
+    const second = await resolveBatches(config, [...retry.keys()]);
+    const recovered = new Set(
+      second.resolved.map((r) => retry.get(r.query)).filter((n): n is string => !!n),
+    );
+    resolved = [...resolved, ...second.resolved];
+    unresolved = unresolved.filter((n) => !recovered.has(n));
   }
 
   // Same company can appear on many scraped pages under slightly different

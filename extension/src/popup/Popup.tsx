@@ -353,7 +353,7 @@ const Popup: React.FC = () => {
   };
 
   /**
-   * Company names -> Lix ids (via worker) -> people-search URLs, 20 companies
+   * Company names -> Lix ids (via worker) -> people-search URLs, 50 companies
    * per URL. Persisted so the links survive the popup closing.
    */
   const handleBuildSearchUrls = async () => {
@@ -616,8 +616,8 @@ const Popup: React.FC = () => {
                 </div>
               ))}
               {searchUrls.unresolved.length > 0 && (
-                <span className="job-meta" title={searchUrls.unresolved.join(', ')}>
-                  {searchUrls.unresolved.length} not found on LinkedIn
+                <span className="job-meta">
+                  Not found on LinkedIn: {searchUrls.unresolved.join(', ')}
                 </span>
               )}
             </div>

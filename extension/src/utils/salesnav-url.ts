@@ -11,8 +11,9 @@ export interface ResolvedCompany {
   text: string;
 }
 
-/** LinkedIn URLs degrade past ~20 company values — split into multiple searches. */
-const MAX_COMPANIES_PER_URL = 20;
+/** Sales Nav accepts long filter lists; ~50 values keeps the URL well under
+ *  browser/proxy limits (~5KB). Split into multiple searches past that. */
+const MAX_COMPANIES_PER_URL = 50;
 
 function encodeFilterValue(company: ResolvedCompany): string {
   const encodedText = encodeURIComponent(company.text).replace(/%20/g, '%2520');

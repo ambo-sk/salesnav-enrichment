@@ -553,7 +553,7 @@ async function main() {
     assertValidZip(buffer);
   });
 
-  await check('company search URLs encode filters and chunk at 20 companies', async () => {
+  await check('company search URLs encode filters and chunk at 50 companies', async () => {
     const { buildCompanySearchUrls } = await import('../src/utils/salesnav-url');
 
     const one = buildCompanySearchUrls([{ id: '162479', text: 'Apple Inc.' }]);
@@ -566,11 +566,21 @@ async function main() {
     assert.deepEqual(one[0].companies, ['Apple Inc.']);
 
     const many = buildCompanySearchUrls(
-      Array.from({ length: 45 }, (_, i) => ({ id: `${i}`, text: `Co ${i}` })),
+      Array.from({ length: 120 }, (_, i) => ({ id: `${i}`, text: `Co ${i}` })),
     );
     assert.equal(many.length, 3);
-    assert.equal(many[0].companies.length, 20);
-    assert.equal(many[2].companies.length, 5);
+    assert.equal(many[0].companies.length, 50);
+    assert.equal(many[2].companies.length, 20);
+  });
+
+  await check('cleanCompanyName strips legal suffixes and parentheticals', async () => {
+    const { cleanCompanyName } = await import('../src/utils/worker-api');
+    assert.equal(cleanCompanyName('Acme Payments Ltd.'), 'Acme Payments');
+    assert.equal(cleanCompanyName('Sokin Global Holdings Limited'), 'Sokin Global');
+    assert.equal(cleanCompanyName('Wise (UK)'), 'Wise');
+    assert.equal(cleanCompanyName('Klarna'), 'Klarna');
+    // Suffix requires a separator — brand names ending in "co" survive.
+    assert.equal(cleanCompanyName('Monzo'), 'Monzo');
   });
 
   await check('companyWorkbookFilename is filesystem safe', () => {
